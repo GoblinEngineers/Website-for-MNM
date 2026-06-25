@@ -157,7 +157,12 @@ if raw_df is not None:
         lucky_data = p_data[p_data['Pod Size'] == 4]
         if not lucky_data.empty:
             seat_stats = lucky_data.groupby('Seat')['Result'].apply(lambda x: (x.str.lower() == 'win').sum()/len(x))
-            best_seat = int(seat_stats.idxmax())
+            
+            # Check if seat_stats actually has results before getting the max
+            if not seat_stats.empty:
+                best_seat = int(seat_stats.idxmax())
+            else:
+                best_seat = "N/A"
         else:
             best_seat = "N/A"
 
