@@ -1,0 +1,3 @@
+CODE TO RUN everyhing
+
+python -m streamlit run app.py
