@@ -1,3 +1,5 @@
 CODE TO RUN everyhing
 
 python -m streamlit run app.py
+
+python -m streamlit run Testing_Updates.py
