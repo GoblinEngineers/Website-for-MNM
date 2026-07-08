@@ -31,6 +31,7 @@ def calculate_league_stats(df_view, mode="points", min_req=8):
     if df_view.empty:
         return pd.DataFrame(), pd.DataFrame()
 
+    # 1. Calculate the core stats
     stats = df_view.groupby('Player').agg(
         GP=('Result', 'count'),
         Wins=('Result', lambda x: (x.str.strip().str.lower() == 'win').sum()),
@@ -38,10 +39,13 @@ def calculate_league_stats(df_view, mode="points", min_req=8):
         Draws=('Result', lambda x: (x.str.strip().str.lower() == 'draw').sum())
     ).reset_index()
 
-    # Win% Formula: (Wins + 0.25*Draws) / GP
+    # 2. Win% Formula: (Wins + 0.25*Draws) / GP
     stats['Win%'] = (((stats['Wins'] + (stats['Draws'] * 0.25)) / stats['GP']) * 100).round(1)
+    
+    # 3. Create the Record string (W/L/D)
     stats['Record'] = stats.apply(lambda x: f"{int(x['Wins'])}/{int(x['Losses'])}/{int(x['Draws'])}", axis=1)
 
+    # 4. Calculate Rating based on mode
     if mode == "points":
         # Base 100 + ((W*3) + (L*-1)) * 3
         stats['Rating'] = 100 + ((stats['Wins'] * 3) + (stats['Losses'] * -1)) * 3
@@ -49,10 +53,11 @@ def calculate_league_stats(df_view, mode="points", min_req=8):
         # Championship System: Rank by Win% (Scaled x10)
         stats['Rating'] = (stats['Win%'] * 10).round(0)
 
-    # Calculate Global Ranks before filtering for the "Would Be" logic
+    # 5. Sort by Rating to determine "Potential" rank
     stats = stats.sort_values('Rating', ascending=False)
     stats['Would_Be'] = range(1, len(stats) + 1)
 
+    # 6. Split into Qualified and Bench
     qualified = stats[stats['GP'] >= min_req].copy()
     bench = stats[stats['GP'] < min_req].copy()
 
@@ -61,8 +66,8 @@ def calculate_league_stats(df_view, mode="points", min_req=8):
         qualified = qualified[['Rank', 'Player', 'Rating', 'Win%', 'Record', 'GP']]
     
     if not bench.empty:
-        bench['Needed'] = min_req - bench['GP']
-        bench = bench[['Would_Be', 'Player', 'GP', 'Needed']]
+        # We include 'Record' and 'GP' here for the Bench view
+        bench = bench[['Would_Be', 'Player', 'Record', 'GP']]
         
     return qualified, bench
 
@@ -135,18 +140,20 @@ if raw_df is not None:
                 hide_index=True, use_container_width=True
             )
 
-        # --- THE BENCH (Restored) ---
+        # --- THE BENCH ---
         if not bench.empty:
             st.divider()
             st.markdown("### ⏳ The Bench")
-            st.caption(f"Unranked players who need {int(min_req)} games to qualify.")
+            st.caption(f"Unranked players (Under {int(min_req)} games)")
             st.dataframe(
                 bench, 
                 column_config={
                     "Would_Be": "Rank?",
-                    "Needed": "Games More"
+                    "Record": "W/L/D",
+                    "GP": "Games"
                 },
-                hide_index=True, use_container_width=True
+                hide_index=True, 
+                use_container_width=True
             )
 
  # --- TAB 2: MY STATS ---

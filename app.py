@@ -66,7 +66,7 @@ def calculate_league_stats(df_view, mode="points", min_req=8):
         qualified = qualified[['Rank', 'Player', 'Rating', 'Win%', 'Record', 'GP']]
     
     if not bench.empty:
-        # We include 'Record' and 'GP' here for the Bench view
+        # Show Potential Rank, Player, W/L/D Record, and Total Games
         bench = bench[['Would_Be', 'Player', 'Record', 'GP']]
         
     return qualified, bench
@@ -109,9 +109,8 @@ if raw_df is not None:
     # --- RAGAVAN CHECK ---
     if season_df.empty:
         st.markdown("<h2 style='text-align: center;'>⚔️ The MNM Stats</h2>", unsafe_allow_html=True)
-        st.write("")
         st.warning(f"🐒 **The data you are looking for was stolen by Ragavan!**")
-        st.info(f"There are no recorded matches for **{sel_year} {sel_q if sel_year >= 2026 else ''}** yet. Try selecting a different season in the sidebar.")
+        st.info(f"There are no recorded matches for **{sel_year}** yet.")
         st.stop()
 
     leaderboard, bench = calculate_league_stats(season_df, mode, min_req)
@@ -119,6 +118,7 @@ if raw_df is not None:
     st.markdown("<h2 style='text-align: center;'>⚔️ The MNM Stats</h2>", unsafe_allow_html=True)
     st.info(desc)
 
+    # Define the top-level tabs
     tab1, tab2, tab3 = st.tabs(["🏆 Leaderboard", "👤 My Stats", "📜 Log"])
 
     # --- TAB 1: LEADERBOARD ---
@@ -140,7 +140,7 @@ if raw_df is not None:
                 hide_index=True, use_container_width=True
             )
 
-        # --- THE BENCH ---
+        # --- THE BENCH (Correctly nested inside Tab 1) ---
         if not bench.empty:
             st.divider()
             st.markdown("### ⏳ The Bench")
@@ -156,7 +156,7 @@ if raw_df is not None:
                 use_container_width=True
             )
 
- # --- TAB 2: MY STATS ---
+    # --- TAB 2: MY STATS ---
     with tab2:
         player_sel = st.selectbox("Search Player", sorted(raw_df['Player'].unique()))
         p_data = raw_df[raw_df['Player'] == player_sel].copy()
@@ -169,20 +169,15 @@ if raw_df is not None:
         lifetime_wr = ((t_wins + (t_draws * 0.25)) / total_gp * 100) if total_gp > 0 else 0
         
         # 2. Form Logic (Last 32 games)
-        # Convert wins/draws to values
         p_data['Win_Val'] = (p_data['Result'].str.lower() == 'win').astype(int) + ((p_data['Result'].str.lower() == 'draw').astype(int) * 0.25)
-        
         recent_32 = p_data.tail(32)
-        # If player has < 32 games, we calculate based on actual games played
         form_32_wr = (recent_32['Win_Val'].mean() * 100) if not recent_32.empty else 0
-        momentum_delta = form_32_wr - lifetime_wr
 
-        # Metrics Display (4 columns for mobile fit)
+        # Metrics Display
         c1, c2, c3 = st.columns(3)
         c1.metric("Games Played", total_gp)
         c2.metric("Total WR", f"{lifetime_wr:.1f}%")
         c3.metric("Last 32 games WR", f"{form_32_wr:.1f}%")
-        #c4.metric("Momentum", f"{momentum_delta:+.1f}%", delta=round(float(momentum_delta), 1))
 
         # Lucky Seat (4-player only)
         lucky_data = p_data[p_data['Pod Size'] == 4]
@@ -192,7 +187,6 @@ if raw_df is not None:
             if not seat_stats.empty:
                 best_seat = f"Seat {int(seat_stats.idxmax())}"
 
-        # --- NEMESIS & SEAT ---
         st.divider()
         col_left, col_right = st.columns(2)
         with col_left:
@@ -209,11 +203,9 @@ if raw_df is not None:
             st.markdown("#### 🍀 Lucky Seat")
             st.write(f"Best position: **{best_seat}**")
 
-        # --- THE GRAPH (Now at the bottom) ---
         st.divider()
         st.markdown("#### ⚡ EMA Win Rate")
         
-        # Momentum Math (Double Smoothing)
         WINDOW = 32
         PRIOR_WR = 0.25
         wins_list = p_data['Win_Val'].tolist()
