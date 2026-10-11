@@ -133,7 +133,7 @@ def _rank_and_split(stats, min_req, show_carry):
         qualified = qualified[cols]
 
     if not bench.empty:
-        cols = ['Would_Be', 'Player'] + (['Carry'] if show_carry else []) + ['Record', 'GP']
+        cols = ['Would_Be', 'Player', 'Rating'] + (['Carry'] if show_carry else []) + ['Record', 'GP']
         bench = bench[cols]
 
     return qualified, bench
@@ -212,8 +212,12 @@ def bracket_percentile(df, player):
     return label, pct, len(grp)
 
 
+# badges you can only ever earn once; everything else can be earned again
+ONE_TIME_BADGES = {"opening", "luck", "regular", "grinder", "fixture", "legend", "wins1", "wins2", "wins3",
+                   "seats", "oddtable", "peace", "scarred", "bridesmaid"}
+
 BADGES = [  # (key, icon, name, description)
-    ("belt", "🥇", "Belt Holder", "Won Q1, Q2, or Q3 and got the belt"),
+    ("belt", "🥇", "Belt Holder", "Won a quarter or the yearly title and got the belt"),
     ("contender", "🥊", "Contender", f"Finished in the top {TOP_N} of a quarter"),
     ("undisputed", "👑", "Undisputed", "Won the yearly belt"),
     ("board", "📋", "On the Board", "Made the yearly scoreboard"),
@@ -254,7 +258,7 @@ BADGES = [  # (key, icon, name, description)
     ("fivealive", "🖐️", "Five-Alive", f"Won at least once on {FIVE_ALIVE_RUN} Mondays in a row"),
     ("ironclad", "🛡️", "Ironclad", f"Went {IRONCLAD_RUN} games in a row without a loss"),
     ("cold", "🥶", "Cold Snap", f"Lost {COLD_RUN} games in a row"),
-    ("glow", "✨", "Glow Up", f"Raised your win rate {GLOW_POINTS}+ points from the previous quarter"),
+    ("glow", "✨", "Glow Up", f"Win rate up {GLOW_POINTS}+ percentage points from last quarter"),
     ("underdog", "🐕", "Underdog", "Won a pod where you were the lowest-ranked player at the table"),
     ("gauntlet", "🏰", "Gauntlet", f"Won a pod with 2 or more of the top {TOP_N}"),
     ("closer", "🔔", "Closer", "Won Round 2 on the last Monday of a quarter"),
@@ -289,7 +293,7 @@ def _board_before(df, night):
     return None if lb.empty else lb
 
 
-def _quirky_badges(df, add, curr_year, curr_q):
+def _quirky_badges(df, add, curr_year, curr_q, notes=None):
     """The odd-moment badges: streak breaks, comebacks, board upsets, rivalries."""
     d = df.sort_values(['Date', 'Round']).copy()
     d['_pk'] = list(zip(d['Date'], d['Round'], d['Pod ID']))
@@ -370,6 +374,8 @@ def _quirky_badges(df, add, curr_year, curr_q):
                     add(w, 'rival')
                 if beats[(w, o)] == OWNER_BEATS:
                     add(w, 'owner')
+                    if notes is not None:
+                        notes.setdefault('owner_of', {}).setdefault(w, []).append(o)
 
     # upsets against the board, using the standings going into each Monday
     for night in nights:
@@ -488,6 +494,8 @@ def compute_badges(df, curr_year, curr_q):
                 lb, _ = calculate_league_stats(ydf, MIN_GAMES_LEGACY)
                 if not lb.empty:
                     add(lb.iloc[0]['Player'], 'undisputed')
+                    add(lb.iloc[0]['Player'], 'belt')          # the yearly winner gets the belt too
+                    winners[(y, 4)] = lb.iloc[0]['Player']     # counts toward back-to-back belts
                     for p in lb['Player']:
                         add(p, 'board')
             continue
@@ -533,32 +541,37 @@ def compute_badges(df, curr_year, curr_q):
                     add(lb.iloc[0]['Player'], 'belt')
                 else:
                     add(lb.iloc[0]['Player'], 'undisputed')
+                    add(lb.iloc[0]['Player'], 'belt')          # the yearly winner gets the belt too
                     for p in lb['Player']:
                         add(p, 'board')
             qkeys.append((y, q))
 
-    for k1, k2 in zip(qkeys, qkeys[1:]):              # back-to-back quarters
+    titles = sorted(winners)                           # every belt in order (legacy years count as one belt)
+    for k1, k2 in zip(titles, titles[1:]):            # back-to-back belts
+        if winners.get(k1) is not None and winners.get(k1) == winners.get(k2):
+            add(winners[k1], 'b2b')
+
+    for k1, k2 in zip(qkeys, qkeys[1:]):
         for p, v in qwr[k2].items():
             if p in qwr[k1] and v - qwr[k1][p] >= GLOW_POINTS:
                 add(p, 'glow')
         for p, rt in qrating[k2].items():
             if rt > BASE_RATING and qrating[k1].get(p, BASE_RATING) < BASE_RATING:
                 add(p, 'rags')
-        if winners.get(k1) is not None and winners.get(k1) == winners.get(k2):
-            add(winners[k1], 'b2b')
 
     for p, n in Counter(seconds.values()).items():     # always the bridesmaid
         if n >= BRIDESMAID_TIMES:
             add(p, 'bridesmaid')
 
-    _quirky_badges(df, add, curr_year, curr_q)
+    notes = {'owner_of': {}}
+    _quirky_badges(df, add, curr_year, curr_q, notes)
 
     # Against the Odds: won a pod where all 3 opponents already held a belt (Q1-Q3) at the time
     belt_since = {}
     for (y, q), p in winners.items():
-        if q < 4:
-            last = df[(df['Year'] == y) & (df['Quarter'] == f'Q{q}')]['Date'].max()
-            belt_since[p] = min(belt_since.get(p, last), last)
+        sub = df[df['Year'] == y] if q == 4 else df[(df['Year'] == y) & (df['Quarter'] == f'Q{q}')]
+        last = sub['Date'].max()
+        belt_since[p] = min(belt_since.get(p, last), last)
     for _, g in df.groupby(['Date', 'Round', 'Pod ID']):
         won = g.loc[g['Res'] == 'win', 'Player'].tolist()
         if len(g) != 4 or len(won) != 1:
@@ -568,7 +581,7 @@ def compute_badges(df, curr_year, curr_q):
             add(won[0], 'odds')
 
     earned = {p: v for p, v in earned.items() if p not in IGNORED_PLAYERS}
-    return earned, {'winners': winners, 'qkeys': qkeys, 'qrating': qrating}
+    return earned, {'winners': winners, 'qkeys': qkeys, 'qrating': qrating, 'owner_of': notes['owner_of']}
 
 
 def _n(n, word):
@@ -821,18 +834,16 @@ def next_up(df, player, mine, extras, curr_year, curr_q):
                 put('green', 0, 1, ", ".join(bits),
                     0.1 + 0.5 * min(gp_q / MIN_GAMES_Q, 1) * (1 if rating > BASE_RATING else 0.6), tag)
 
-        weeks_all = set(qdf['Year_Week'])
-        weeks_me = set(qdf.loc[qdf['Player'] == player, 'Year_Week'])
-        if len(weeks_all) >= 1 and weeks_me >= weeks_all:
-            put('ironman', 0, 1, f"Perfect so far: {len(weeks_all)}/{len(weeks_all)} weeks", 0.85, tag)
-
         prev_key = (curr_year, curr_q - 1) if curr_q > 1 else (curr_year - 1, 4)
         if extras['qkeys'] and extras['qkeys'][-1] == prev_key:
             prev_rating = extras['qrating'][prev_key].get(player)
             if prev_rating is not None and prev_rating < BASE_RATING:
                 put('rags', 0, 1, f"Last quarter: {prev_rating}. Finish above {BASE_RATING}", 0.5, tag)
-            if extras['winners'].get(prev_key) == player:
-                put('b2b', 0, 1, "You won last quarter, win this one too", 0.5, tag)
+
+    if curr_year >= CHAMPIONSHIP_START_YEAR:
+        prev_key = (curr_year, curr_q - 1) if curr_q > 1 else (curr_year - 1, 4)
+        if extras['winners'].get(prev_key) == player:
+            put('b2b', 0, 1, "You won the last belt, win this one too", 0.5, f"Q{curr_q} so far")
 
     items.sort(key=lambda i: -i['frac'])
     return items
@@ -1064,6 +1075,59 @@ def move_badge(kind, steps):
     return '<span style="opacity:0.4;">–</span>'
 
 
+def _quarter_end(today):
+    q = (today.month - 1) // 3 + 1
+    end_month = q * 3
+    nxt = datetime.date(today.year + (end_month == 12), end_month % 12 + 1, 1)
+    return nxt - datetime.timedelta(days=1)
+
+
+def mondays_left_after(last_date, today):
+    """League Mondays still to come this quarter: after the latest recorded game, through the quarter's end."""
+    d, end, n = last_date + datetime.timedelta(days=1), _quarter_end(today), 0
+    while d <= end:
+        n += d.weekday() == 0
+        d += datetime.timedelta(days=1)
+    return n
+
+
+def title_race(lb, bench, n_left, min_req):
+    """{player: 'WIN' | 'OUT'}. WIN = first place is locked in even if they lose every remaining game and
+    everyone else wins all of theirs. OUT = even winning every remaining game can't catch someone who
+    is already ranked and loses all of theirs. Two games a Monday."""
+    if lb is None or lb.empty:
+        return {}
+    if n_left == 0:                                     # nothing left to play: the final ranking decides
+        return {p: ('WIN' if r == 1 else 'OUT') for p, r in zip(lb['Player'], lb['Rank'])}
+    games = 2 * n_left
+    gain, loss = games * WIN_PTS, games * LOSS_PTS
+    ceil = dict(zip(lb['Player'], lb['Rating'] + gain))
+    floor = dict(zip(lb['Player'], lb['Rating'] + loss))
+    if bench is not None and not bench.empty:
+        for p, r, gp in zip(bench['Player'], bench['Rating'], bench['GP']):
+            if gp + games >= min_req:                       # can still reach the game minimum
+                ceil[p] = r + gain
+    out = {}
+    for p in floor:
+        others_ceil = [v for o, v in ceil.items() if o != p]
+        others_floor = [v for o, v in floor.items() if o != p]
+        if others_ceil and floor[p] > max(others_ceil):
+            out[p] = 'WIN'
+        elif others_floor and max(others_floor) > ceil[p]:
+            out[p] = 'OUT'
+    return out
+
+
+def race_badge(kind):
+    if kind == 'WIN':
+        return ('<span style="background: rgba(212,175,55,0.45); border-radius:6px; padding:1px 5px; '
+                'font-size:10px; font-weight:800;">WIN</span>')
+    if kind == 'OUT':
+        return ('<span style="background: rgba(255,107,107,0.30); border-radius:6px; padding:1px 5px; '
+                'font-size:10px; font-weight:800;">OUT</span>')
+    return ""
+
+
 def html_table(df, headers=None, fmt=None, row_bg=None, left=None, html_cols=()):
     """A table that fits the screen: headers wrap, columns share the width, nothing is hidden off to the side."""
     headers, fmt = headers or {}, fmt or {}
@@ -1264,6 +1328,99 @@ def show_store_stats(sdf):
     st.markdown(facts)
 
 
+# =====================================================================
+# NEWS (top of the page)
+# =====================================================================
+NEWS_SHOW = 4              # news lines shown before "Show more"
+NEWS_MAX_CLAIM_LINES = 8   # badge-claim lines (one per player) in the news
+
+
+def quarter_weeks_left(today):
+    """(quarter number, league Mondays left in it, counting today if it's a Monday)."""
+    q = (today.month - 1) // 3 + 1
+    end_month = q * 3
+    nxt = datetime.date(today.year + (end_month == 12), end_month % 12 + 1, 1)
+    end = nxt - datetime.timedelta(days=1)
+    d, n = today, 0
+    while d <= end:
+        n += d.weekday() == 0
+        d += datetime.timedelta(days=1)
+    return q, n
+
+
+def weeks_left_news(today):
+    q, n = quarter_weeks_left(today)
+    if n == 0:
+        return f"⏳ <b>Q{q} is done</b>"
+    if n == 1:
+        return f"⏳ <b>Last Monday of Q{q}!</b>"
+    return f"⏳ <b>{n} weeks left</b> in Q{q}"
+
+
+def board_news(lb, prev_lb):
+    """Scoreboard news, one short line per kind: joined the board, into the top 5, out of the top 5."""
+    out = []
+    if lb is None or lb.empty or prev_lb is None or prev_lb.empty:
+        return out
+    esc = html.escape
+    prev = dict(zip(prev_lb['Player'], prev_lb['Rank']))
+    now = dict(zip(lb['Player'], lb['Rank']))
+    joined = [f"{esc(p)} (#{int(r)})" for p, r in now.items() if p not in prev]
+    into = [esc(p) for p, r in now.items() if p in prev and int(r) <= TOP_N < int(prev[p])]
+    outof = [esc(p) for p, r in prev.items() if int(r) <= TOP_N and p in now and int(now[p]) > TOP_N]
+    if into:
+        out.append(f"🥇 <b>Into the top {TOP_N}:</b> {', '.join(into)}")
+    if outof:
+        out.append(f"⬇️ <b>Out of the top {TOP_N}:</b> {', '.join(outof)}")
+    if joined:
+        out.append(f"🆕 <b>Joined the board:</b> {', '.join(joined)}")
+    return out
+
+
+def badge_news(df, now_earned, rarity):
+    """Badges claimed at the latest Monday, one line per badge (compares against the board before that night)."""
+    latest = df['Date'].max()
+    prev_df = df[df['Date'] < latest]
+    if prev_df.empty:
+        return []
+    last = df[df['Date'] == latest].iloc[0]
+    before, _ = compute_badges(prev_df, int(last['Year']), int(str(last['Quarter'])[1]))
+    meta = {b[0]: b for b in BADGES}
+    held_before = {k for e in before.values() for k in e}
+    per_badge = {}
+    for p, e in now_earned.items():
+        for k in e:
+            if k != 'opening' and k not in before.get(p, {}):
+                per_badge.setdefault(k, []).append(p)
+    lines = []
+    for k in sorted(per_badge, key=lambda k: rarity.get(k, 100)):          # rarest first
+        who = ", ".join(html.escape(p) for p in sorted(per_badge[k]))
+        star = " ⭐ first ever" if k not in held_before else ""
+        lines.append(f"{meta[k][1]} <b>{html.escape(meta[k][2])}</b>{star}: {who}")
+    if len(lines) > NEWS_MAX_CLAIM_LINES:
+        extra = len(lines) - NEWS_MAX_CLAIM_LINES
+        lines = lines[:NEWS_MAX_CLAIM_LINES] + [f"…and {extra} more new {'badge' if extra == 1 else 'badges'}. See the 🏅 Badges tab."]
+    return lines
+
+
+def show_news(lines, note="", top=""):
+    if not lines and not top:
+        return
+    row = lambda t: f'<div style="margin-top:4px; line-height:1.4; font-size:14px;">{t}</div>'
+    body = "".join(row(t) for t in lines[:NEWS_SHOW])
+    if len(lines) > NEWS_SHOW:
+        body += (f'<details style="margin-top:4px;"><summary style="cursor:pointer; font-size:13px; opacity:0.8;">'
+                 f'Show {len(lines) - NEWS_SHOW} more</summary>'
+                 + "".join(row(t) for t in lines[NEWS_SHOW:]) + '</details>')
+    st.markdown(
+        '<div style="background: rgba(0, 255, 204, 0.07); border-left: 5px solid #00ffcc; border-radius: 14px; '
+        'padding: 10px 14px; margin-bottom: 8px;">'
+        '<div style="display:flex; flex-wrap:wrap; justify-content:space-between; gap:2px 12px; font-size:14px;">'
+        f'<span><b>📰 News</b> <small style="color:gray;">{html.escape(note)}</small></span><span>{top}</span></div>'
+        f'{body}</div>',
+        unsafe_allow_html=True)
+
+
 # --- APP START ---
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 raw_df = load_data()
@@ -1327,7 +1484,7 @@ if raw_df is not None:
 
     # Board as it stood before the latest week, for the rank arrows
     move_src = year_df[year_df['Quarter'] == 'Q4'] if is_q4 else season_df
-    moves, move_note = {}, ""
+    moves, move_note, prev_lb = {}, "", None
     if not move_src.empty and not leaderboard.empty:
         latest_week = move_src['Year_Week'].max()
         prev_src = (year_df if is_q4 else season_df)
@@ -1340,11 +1497,8 @@ if raw_df is not None:
             move_note = f"Arrows show how each rank moved after the {last_day.strftime('%b %d')} games."
 
     st.markdown("<h2 style='text-align: center;'>⚔️ The MNM Stats</h2>", unsafe_allow_html=True)
-    st.info(desc)
-    season_label = f"{sel_year} · {sel_q}" if sel_year >= CHAMPIONSHIP_START_YEAR else f"{sel_year}"
-    st.caption(f"Showing **{season_label}**. To change the season, tap the arrow at the top-left of the screen.")
 
-    # Badge data shared by My Stats (earned only) and the Badges tab (everything)
+    # Badge data shared by My Stats (earned only), the Badges tab (everything) and the news
     curr_q_num = int(curr_q_label[1])
     all_earned, badge_extras = compute_badges(raw_df, curr_year, curr_q_num)
     holders = {b[0]: sorted(((p, e[b[0]]) for p, e in all_earned.items() if b[0] in e),
@@ -1352,8 +1506,21 @@ if raw_df is not None:
     rarity = {k: len(v) / len(all_earned) * 100 for k, v in holders.items()}
     player_names = sorted(raw_df['Player'].unique())
 
+    # --- NEWS ---
+    on_current_season = sel_year == curr_year and (sel_year < CHAMPIONSHIP_START_YEAR or sel_q.startswith(curr_q_label))
+    news = badge_news(raw_df, all_earned, rarity)
+    if on_current_season:
+        news += board_news(leaderboard, prev_lb)
+    show_news(news, f"after {raw_df['Date'].max().strftime('%b %d')}",
+              weeks_left_news(datetime.date.today()) if on_current_season else "")
+
+    # Past seasons are finished (nothing left to play); the current one counts the Mondays that remain
+    n_left = (mondays_left_after(raw_df['Date'].max().date(), datetime.date.today())
+              if on_current_season else 0)
+    race = title_race(leaderboard, bench, n_left, min_req)
+
     # Define the top-level tabs
-    tab1, tab2, tab_store, tab_badges, tab3 = st.tabs(["🏆 Board", "👤 My Stats", "🏪 Store", "🏅 Badges", "📜 Log"])
+    tab1, tab2, tab_store, tab_badges, tab3 = st.tabs(["🏆 Board", "👤 My Stats", "📊 Stats", "🏅 Badges", "📜 Log"])
 
     # --- TAB 1: LEADERBOARD ---
     with tab1:
@@ -1364,6 +1531,7 @@ if raw_df is not None:
                 return 'rgba(192, 192, 192, 0.18)'
             return ''
 
+        st.info(desc)
         if not leaderboard.empty:
             start_txt = "your starting score (100 + carry-in)" if is_q4 else f"the {BASE_RATING}-point starting score"
             st.markdown(
@@ -1374,14 +1542,17 @@ if raw_df is not None:
                 f'Over {BASE_RATING} points</div>',
                 unsafe_allow_html=True)
             show_lb = leaderboard.copy()
-            if moves:
-                show_lb.insert(1, 'Move', [move_badge(*moves[p]) for p in show_lb['Player']])
+            if moves or race:
+                show_lb.insert(1, 'Move', [race_badge(race[p]) if p in race else (move_badge(*moves[p]) if p in moves else "")
+                                           for p in show_lb['Player']])
             html_table(show_lb,
                        headers={'Rank': '#', 'Move': '', 'Carry': 'Carry-in', 'Record': 'W/L/D', 'GP': 'Games'},
                        fmt={'Rank': _int, 'Rating': _int, 'Carry': _int, 'Win%': _pct, 'GP': _int},
                        row_bg=row_bg, left=['Player'], html_cols=('Move',))
-            if move_note:
-                st.caption(move_note + " NEW = wasn't ranked before.")
+            if move_note or race:
+                st.caption(((move_note + " NEW = wasn't ranked before. ") if move_note else "")
+                           + ("WIN = first place. OUT = can no longer win, so their arrow is hidden."
+                              if race else ""))
         elif is_q4:
             st.caption(f"No one has reached the {int(min_req)}-game minimum yet.")
 
@@ -1391,7 +1562,7 @@ if raw_df is not None:
             st.markdown("### ⏳ The Bench")
             scope = "games this year" if is_q4 else "games"
             st.caption(f"Unranked players (Under {int(min_req)} {scope})")
-            html_table(bench,
+            html_table(bench.drop(columns='Rating'),
                        headers={'Would_Be': 'Rank?', 'Carry': 'Carry-in', 'Record': 'W/L/D', 'GP': 'Games'},
                        fmt={'Would_Be': _int, 'Carry': _int, 'GP': _int},
                        left=['Player'])
@@ -1499,8 +1670,11 @@ if raw_df is not None:
             earned_cards = "".join(
                 f'<div class="mnm-metric" style="border-left:5px solid #00ffcc;">'
                 f'<div style="font-size:22px">{icon}</div>'
-                f'<b>{html.escape(name)}{f" ×{my_badges[key]}" if my_badges[key] > 1 else ""}</b><br>'
-                f'<small style="color:gray">{html.escape(desc)}</small></div>'
+                f'<b>{html.escape(name)}{f" ×{my_badges[key]}" if my_badges[key] > 1 and key != "owner" else ""}</b><br>'
+                f'<small style="color:gray">{html.escape(desc)}</small>'
+                + (f'<br><small style="color:#00ffcc">{html.escape(", ".join(sorted(badge_extras["owner_of"].get(player_sel, []))))}</small>'
+                   if key == "owner" else "")
+                + '</div>'
                 for key, icon, name, desc in sorted((b for b in BADGES if b[0] in my_badges),
                                                     key=lambda b: rarity[b[0]]))
             st.markdown('<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); '
@@ -1562,7 +1736,11 @@ if raw_df is not None:
             dim = "" if have else "opacity:0.35; filter:grayscale(1);"
             edge = "#00ffcc" if have else "#555"
             bg = "rgba(0, 255, 204, 0.08)" if have else "rgba(255,255,255,0.05)"
-            who = ", ".join(html.escape(p) + (f" ×{n}" if n > 1 else "") for p, n in who_list) or "Nobody yet"
+            def _who(p, n):
+                if key == "owner":
+                    return html.escape(p) + " (" + html.escape(", ".join(sorted(badge_extras["owner_of"].get(p, [])))) + ")"
+                return html.escape(p) + (f" ×{n}" if n > 1 else "")
+            who = ", ".join(_who(p, n) for p, n in who_list) or "Nobody yet"
             return (f'<details style="box-sizing:border-box; background: {bg}; padding: 22px 20px; border-radius: 14px; border-left: 5px solid {edge};">'
                     f'<summary style="display:block; cursor:pointer;">'
                     f'<div style="min-height:150px;">'
@@ -1573,14 +1751,23 @@ if raw_df is not None:
                     f'<div style="margin-top:8px; font-size:13px;"><small style="color:gray">Earned by:</small><br>{who}</div>'
                     f'</details>')
 
-        # claimed first (rarest on top), then unclaimed in list order
-        ordered_badges = sorted(BADGES, key=lambda b: (not holders[b[0]], rarity[b[0]] if holders[b[0]] else 0))
-        st.markdown('<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); '
-                    'gap:16px; align-items:stretch;">'
-                    + "".join(badge_card(b) for b in ordered_badges) + '</div>',
-                    unsafe_allow_html=True)
+        def badge_grid(blist):
+            # claimed first (rarest on top), then unclaimed in list order
+            ordered = sorted(blist, key=lambda b: (not holders[b[0]], rarity[b[0]] if holders[b[0]] else 0))
+            st.markdown('<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); '
+                        'gap:16px; align-items:stretch;">'
+                        + "".join(badge_card(b) for b in ordered) + '</div>', unsafe_allow_html=True)
 
-    # --- TAB: STORE STATS ---
+        recurring = [b for b in BADGES if b[0] not in ONE_TIME_BADGES]
+        one_time = [b for b in BADGES if b[0] in ONE_TIME_BADGES]
+        st.markdown(f"##### 🔁 Recurring badges ({sum(1 for b in recurring if holders[b[0]])}/{len(recurring)} claimed)")
+        st.caption("These can be earned again and again.")
+        badge_grid(recurring)
+        st.markdown(f"##### ☝️ One-time badges ({sum(1 for b in one_time if holders[b[0]])}/{len(one_time)} claimed)")
+        st.caption("You can only earn each of these once.")
+        badge_grid(one_time)
+
+    # --- TAB: STATS ---
     with tab_store:
         scope_options = ["All time"] + available_years
         scope = st.selectbox("Season", scope_options, key="store_scope",
