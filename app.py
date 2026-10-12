@@ -48,6 +48,9 @@ GLOW_POINTS = 15             # Glow Up: win-rate points gained vs. the previous 
 WIN_MILESTONES = (10, 25, 50)  # Double Digits / Quarter Century / Half Century
 PEACE_DRAWS = 20             # Peacekeeper: lifetime draws
 SCARRED_LOSSES = 50          # Battle Scarred: lifetime losses
+DOG_WALKER_OWNS = 5            # Owner earned against this many different players
+COLLECTOR_COPIES = 5           # copies of a badge that count toward Collector
+COLLECTOR_KINDS = 5            # how many different badges need that many copies
 NEXT_UP_SHOW = 5               # rows shown in My Stats > Next Up before 'Show more'
 IGNORED_PLAYERS = {"Unknown"}  # placeholder names that shouldn't earn badges
 
@@ -212,9 +215,12 @@ def bracket_percentile(df, player):
     return label, pct, len(grp)
 
 
+# badges earned against specific players: badge key -> where compute_badges keeps the names
+VS_BADGES = {"owner": "owner_of", "rival": "rival_of"}
+
 # badges you can only ever earn once; everything else can be earned again
 ONE_TIME_BADGES = {"opening", "luck", "regular", "grinder", "fixture", "legend", "wins1", "wins2", "wins3",
-                   "seats", "oddtable", "peace", "scarred", "bridesmaid"}
+                   "seats", "oddtable", "peace", "scarred", "bridesmaid", "dogwalker", "collector"}
 
 BADGES = [  # (key, icon, name, description)
     ("belt", "🥇", "Belt Holder", "Won a quarter or the yearly title and got the belt"),
@@ -265,6 +271,8 @@ BADGES = [  # (key, icon, name, description)
     ("wins1", "🔟", "Double Digits", f"Won {WIN_MILESTONES[0]} games"),
     ("wins2", "🎖️", "Quarter Century", f"Won {WIN_MILESTONES[1]} games"),
     ("wins3", "💎", "Half Century", f"Won {WIN_MILESTONES[2]} games"),
+    ("dogwalker", "🦮", "Dog Walker", f"Earned Owner against {DOG_WALKER_OWNS} different players"),
+    ("collector", "🗃️", "Collector", f"Earned {COLLECTOR_COPIES} or more copies of {COLLECTOR_KINDS} different badges"),
     ("odds", "🎰", "Against the Odds", "Won a 4-player pod where all 3 opponents were Belt Holders"),
     ("peace", "🕊️", "Peacekeeper", f"Drew {PEACE_DRAWS} games"),
     ("scarred", "🩹", "Battle Scarred", f"Lost {SCARRED_LOSSES} games and kept coming back"),
@@ -365,13 +373,15 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         w = pods[pk]['winner']
         if w is not None:
             for o in pods[pk]['players']:
-                if o == w:
+                if o == w or o in IGNORED_PLAYERS:
                     continue
                 if streak_before.get((o, pk), 0) >= STREAK_STOP_LEN:
                     add(w, 'stopper')
                 beats[(w, o)] += 1
                 if beats[(w, o)] == RIVAL_BEATS:
                     add(w, 'rival')
+                    if notes is not None:
+                        notes.setdefault('rival_of', {}).setdefault(w, []).append(o)
                 if beats[(w, o)] == OWNER_BEATS:
                     add(w, 'owner')
                     if notes is not None:
@@ -381,6 +391,9 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
     for night in nights:
         lb = _board_before(d, night)
         if lb is None:
+            continue
+        lb = lb[~lb['Player'].isin(IGNORED_PLAYERS)]
+        if lb.empty:
             continue
         leader = lb.iloc[0]['Player']
         rank = dict(zip(lb['Player'], lb['Rank']))
@@ -396,7 +409,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
                 add(w, 'giant')
             if w in bottom:
                 add(w, 'darkhorse')
-            others = [o for o in pods[pk]['players'] if o != w]
+            others = [o for o in pods[pk]['players'] if o != w and o not in IGNORED_PLAYERS]
             if len(top & set(others)) >= 2:
                 add(w, 'gauntlet')
             ranked_others = [o for o in others if o in rank]
@@ -410,7 +423,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         if w is None:
             continue
         for o in pods[pk]['players']:
-            if o != w:
+            if o != w and o not in IGNORED_PLAYERS and w not in IGNORED_PLAYERS:
                 meetings.setdefault(frozenset((w, o)), []).append(w)
     for pair, seq in meetings.items():
         a, b = tuple(pair)
@@ -432,7 +445,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         for p in last_night.loc[(last_night['Round'] == last_night['Round'].max()) & (last_night['Res'] == 'win'), 'Player']:
             add(p, 'closer')
         gp_q = qdf.groupby('Player').size()
-        roster = set(gp_q[gp_q >= ROBIN_MIN_GAMES].index)
+        roster = set(gp_q[gp_q >= ROBIN_MIN_GAMES].index) - IGNORED_PLAYERS
         if len(roster) < 6:
             continue
         met = {p: set() for p in qdf['Player'].unique()}
@@ -563,7 +576,7 @@ def compute_badges(df, curr_year, curr_q):
         if n >= BRIDESMAID_TIMES:
             add(p, 'bridesmaid')
 
-    notes = {'owner_of': {}}
+    notes = {'owner_of': {}, 'rival_of': {}}
     _quirky_badges(df, add, curr_year, curr_q, notes)
 
     # Against the Odds: won a pod where all 3 opponents already held a belt (Q1-Q3) at the time
@@ -580,8 +593,14 @@ def compute_badges(df, curr_year, curr_q):
         if all(o in belt_since and belt_since[o] < g['Date'].iloc[0] for o in others):
             add(won[0], 'odds')
 
+    for p, e in earned.items():                       # badges built from other badges
+        if e.get('owner', 0) >= DOG_WALKER_OWNS:
+            add(p, 'dogwalker')
+        if sum(1 for n in e.values() if n >= COLLECTOR_COPIES) >= COLLECTOR_KINDS:
+            add(p, 'collector')
+
     earned = {p: v for p, v in earned.items() if p not in IGNORED_PLAYERS}
-    return earned, {'winners': winners, 'qkeys': qkeys, 'qrating': qrating, 'owner_of': notes['owner_of']}
+    return earned, {'winners': winners, 'qkeys': qkeys, 'qrating': qrating, 'owner_of': notes['owner_of'], 'rival_of': notes['rival_of']}
 
 
 def _n(n, word):
@@ -738,6 +757,12 @@ def next_up(df, player, mine, extras, curr_year, curr_q):
     put('peace', n_d, PEACE_DRAWS, f"{_n(PEACE_DRAWS - n_d, 'more draw')} ({n_d}/{PEACE_DRAWS})")
     put('scarred', n_l, SCARRED_LOSSES, f"{SCARRED_LOSSES - n_l} more {'loss' if SCARRED_LOSSES - n_l == 1 else 'losses'} ({n_l}/{SCARRED_LOSSES})")
 
+    put('dogwalker', mine.get('owner', 0), DOG_WALKER_OWNS,
+        f"Owner on {mine.get('owner', 0)}/{DOG_WALKER_OWNS} players")
+    kinds = sum(1 for n in mine.values() if n >= COLLECTOR_COPIES)
+    put('collector', kinds, COLLECTOR_KINDS,
+        f"{kinds}/{COLLECTOR_KINDS} badges with {COLLECTOR_COPIES}+ copies")
+
     # Monday-level runs (current run counting back from the latest league Monday)
     nights = sorted(df['Date'].unique())
     by_night = {dt: n for dt, n in g.groupby('Date')}
@@ -775,7 +800,7 @@ def next_up(df, player, mine, extras, curr_year, curr_q):
         mine_pods = d.loc[(d['Player'] == player) & (d['Res'] == 'win'), '_pk']
         for pk, pod in d[d['_pk'].isin(set(mine_pods))].groupby('_pk'):
             if (pod['Res'] == 'win').sum() == 1:
-                beats.update(o for o in pod['Player'] if o != player)
+                beats.update(o for o in pod['Player'] if o != player and o not in IGNORED_PLAYERS)
         if beats:
             foe, c = beats.most_common(1)[0]
             if c < OWNER_BEATS:
@@ -1670,10 +1695,10 @@ if raw_df is not None:
             earned_cards = "".join(
                 f'<div class="mnm-metric" style="border-left:5px solid #00ffcc;">'
                 f'<div style="font-size:22px">{icon}</div>'
-                f'<b>{html.escape(name)}{f" ×{my_badges[key]}" if my_badges[key] > 1 and key != "owner" else ""}</b><br>'
+                f'<b>{html.escape(name)}{f" ×{my_badges[key]}" if my_badges[key] > 1 and key not in VS_BADGES else ""}</b><br>'
                 f'<small style="color:gray">{html.escape(desc)}</small>'
-                + (f'<br><small style="color:#00ffcc">{html.escape(", ".join(sorted(badge_extras["owner_of"].get(player_sel, []))))}</small>'
-                   if key == "owner" else "")
+                + (f'<br><small style="color:#00ffcc">{html.escape(", ".join(sorted(badge_extras[VS_BADGES[key]].get(player_sel, []))))}</small>'
+                   if key in VS_BADGES else "")
                 + '</div>'
                 for key, icon, name, desc in sorted((b for b in BADGES if b[0] in my_badges),
                                                     key=lambda b: rarity[b[0]]))
@@ -1737,8 +1762,8 @@ if raw_df is not None:
             edge = "#00ffcc" if have else "#555"
             bg = "rgba(0, 255, 204, 0.08)" if have else "rgba(255,255,255,0.05)"
             def _who(p, n):
-                if key == "owner":
-                    return html.escape(p) + " (" + html.escape(", ".join(sorted(badge_extras["owner_of"].get(p, [])))) + ")"
+                if key in VS_BADGES:
+                    return html.escape(p) + " (" + html.escape(", ".join(sorted(badge_extras[VS_BADGES[key]].get(p, [])))) + ")"
                 return html.escape(p) + (f" ×{n}" if n > 1 else "")
             who = ", ".join(_who(p, n) for p, n in who_list) or "Nobody yet"
             return (f'<details style="box-sizing:border-box; background: {bg}; padding: 22px 20px; border-radius: 14px; border-left: 5px solid {edge};">'
