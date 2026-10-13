@@ -48,6 +48,12 @@ GLOW_POINTS = 15             # Glow Up: win-rate points gained vs. the previous 
 WIN_MILESTONES = (10, 25, 50)  # Double Digits / Quarter Century / Half Century
 PEACE_DRAWS = 20             # Peacekeeper: lifetime draws
 SCARRED_LOSSES = 50          # Battle Scarred: lifetime losses
+ODD_TABLE_SIZES = {3, 4}          # pod sizes Odd Table Out needs a win in (5-player pods are gone)
+TIER_GOLD_BELOW = 10           # badge held by under this % of players = gold trim
+TIER_SILVER_BELOW = 20         # under this % = silver trim, otherwise bronze
+DOG_WALKER_OWNS = 5            # Owner earned against this many different players
+COLLECTOR_COPIES = 5           # copies of a badge that count toward Collector
+COLLECTOR_KINDS = 5            # how many different badges need that many copies
 NEXT_UP_SHOW = 5               # rows shown in My Stats > Next Up before 'Show more'
 IGNORED_PLAYERS = {"Unknown"}  # placeholder names that shouldn't earn badges
 
@@ -212,9 +218,12 @@ def bracket_percentile(df, player):
     return label, pct, len(grp)
 
 
-# badges you can only ever earn once; everything else can be earned again
+# badges earned against specific players: badge key -> where compute_badges keeps the names
+VS_BADGES = {"owner": "owner_of", "rival": "rival_of", "belt": "belt_of", "undisputed": "undisputed_of"}
+
+# lifetime badges: you can only ever earn each once (everything else can be earned again)
 ONE_TIME_BADGES = {"opening", "luck", "regular", "grinder", "fixture", "legend", "wins1", "wins2", "wins3",
-                   "seats", "oddtable", "peace", "scarred", "bridesmaid"}
+                   "seats", "oddtable", "peace", "scarred", "bridesmaid", "dogwalker", "collector"}
 
 BADGES = [  # (key, icon, name, description)
     ("belt", "🥇", "Belt Holder", "Won a quarter or the yearly title and got the belt"),
@@ -249,7 +258,7 @@ BADGES = [  # (key, icon, name, description)
      else f"Beat a player after losing to them {REVENGE_LOSSES} times in a row"),
     ("dstale", "⚖️", "Double Stalemate", "Drew both games on the same Monday"),
     ("sstreak", "🧊", "Stalemate Streak", f"Drew {DRAW_RUN} games in a row"),
-    ("oddtable", "🎪", "Odd Table Out", "Won in every pod size the league has played"),
+    ("oddtable", "🎪", "Odd Table Out", "Won a 3-player pod and a 4-player pod"),
     ("regreg", "📅", "Regular Regular", f"Played {REGULAR_RUN} league Mondays in a row"),
     ("rival", "🪓", "Rival Slayer", f"Beat the same player {RIVAL_BEATS} times"),
     ("owner", "🔒", "Owner", f"Beat the same player {OWNER_BEATS} times"),
@@ -265,6 +274,8 @@ BADGES = [  # (key, icon, name, description)
     ("wins1", "🔟", "Double Digits", f"Won {WIN_MILESTONES[0]} games"),
     ("wins2", "🎖️", "Quarter Century", f"Won {WIN_MILESTONES[1]} games"),
     ("wins3", "💎", "Half Century", f"Won {WIN_MILESTONES[2]} games"),
+    ("dogwalker", "🦮", "Dog Walker", f"Earned Owner against {DOG_WALKER_OWNS} different players"),
+    ("collector", "🗃️", "Collector", f"Earned {COLLECTOR_COPIES} or more copies of {COLLECTOR_KINDS} different badges"),
     ("odds", "🎰", "Against the Odds", "Won a 4-player pod where all 3 opponents were Belt Holders"),
     ("peace", "🕊️", "Peacekeeper", f"Drew {PEACE_DRAWS} games"),
     ("scarred", "🩹", "Battle Scarred", f"Lost {SCARRED_LOSSES} games and kept coming back"),
@@ -293,6 +304,15 @@ def _board_before(df, night):
     return None if lb.empty else lb
 
 
+def tier_color(pct):
+    """Trim colour by how rare a badge is: gold under 10% of players, silver 10-20%, bronze 20%+."""
+    if pct < TIER_GOLD_BELOW:
+        return "#d4af37"
+    if pct < TIER_SILVER_BELOW:
+        return "#c0c0c0"
+    return "#cd7f32"
+
+
 def _quirky_badges(df, add, curr_year, curr_q, notes=None):
     """The odd-moment badges: streak breaks, comebacks, board upsets, rivalries."""
     d = df.sort_values(['Date', 'Round']).copy()
@@ -305,7 +325,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         pods[pk] = {'players': g['Player'].tolist(), 'winner': won[0] if len(won) == 1 else None,
                     'date': g['Date'].iloc[0]}
     pod_order = sorted(pods, key=lambda k: (k[0], k[1]))
-    sizes = {int(x) for x in d['Pod Size'].dropna().unique()}
+    sizes = {int(x) for x in d['Pod Size'].dropna().unique()} & ODD_TABLE_SIZES
 
     streak_before = {}
     for p, g in d.groupby('Player'):
@@ -365,13 +385,15 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         w = pods[pk]['winner']
         if w is not None:
             for o in pods[pk]['players']:
-                if o == w:
+                if o == w or o in IGNORED_PLAYERS:
                     continue
                 if streak_before.get((o, pk), 0) >= STREAK_STOP_LEN:
                     add(w, 'stopper')
                 beats[(w, o)] += 1
                 if beats[(w, o)] == RIVAL_BEATS:
                     add(w, 'rival')
+                    if notes is not None:
+                        notes.setdefault('rival_of', {}).setdefault(w, []).append(o)
                 if beats[(w, o)] == OWNER_BEATS:
                     add(w, 'owner')
                     if notes is not None:
@@ -381,6 +403,9 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
     for night in nights:
         lb = _board_before(d, night)
         if lb is None:
+            continue
+        lb = lb[~lb['Player'].isin(IGNORED_PLAYERS)]
+        if lb.empty:
             continue
         leader = lb.iloc[0]['Player']
         rank = dict(zip(lb['Player'], lb['Rank']))
@@ -396,7 +421,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
                 add(w, 'giant')
             if w in bottom:
                 add(w, 'darkhorse')
-            others = [o for o in pods[pk]['players'] if o != w]
+            others = [o for o in pods[pk]['players'] if o != w and o not in IGNORED_PLAYERS]
             if len(top & set(others)) >= 2:
                 add(w, 'gauntlet')
             ranked_others = [o for o in others if o in rank]
@@ -410,7 +435,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         if w is None:
             continue
         for o in pods[pk]['players']:
-            if o != w:
+            if o != w and o not in IGNORED_PLAYERS and w not in IGNORED_PLAYERS:
                 meetings.setdefault(frozenset((w, o)), []).append(w)
     for pair, seq in meetings.items():
         a, b = tuple(pair)
@@ -432,7 +457,7 @@ def _quirky_badges(df, add, curr_year, curr_q, notes=None):
         for p in last_night.loc[(last_night['Round'] == last_night['Round'].max()) & (last_night['Res'] == 'win'), 'Player']:
             add(p, 'closer')
         gp_q = qdf.groupby('Player').size()
-        roster = set(gp_q[gp_q >= ROBIN_MIN_GAMES].index)
+        roster = set(gp_q[gp_q >= ROBIN_MIN_GAMES].index) - IGNORED_PLAYERS
         if len(roster) < 6:
             continue
         met = {p: set() for p in qdf['Player'].unique()}
@@ -450,6 +475,10 @@ def compute_badges(df, curr_year, curr_q):
     """{player: {badge_key: times_earned}} for everyone. Only finished quarters/years count."""
     df = df.assign(_seat=pd.to_numeric(df['Seat'], errors='coerce'))
     earned = {p: {} for p in df['Player'].unique()}
+    notes = {'owner_of': {}, 'rival_of': {}, 'belt_of': {}, 'undisputed_of': {}}
+
+    def note(key, p, label):
+        notes[key].setdefault(p, []).append(label)
 
     def add(p, key, n=1):
         earned[p][key] = earned[p].get(key, 0) + n
@@ -495,6 +524,8 @@ def compute_badges(df, curr_year, curr_q):
                 if not lb.empty:
                     add(lb.iloc[0]['Player'], 'undisputed')
                     add(lb.iloc[0]['Player'], 'belt')          # the yearly winner gets the belt too
+                    note('undisputed_of', lb.iloc[0]['Player'], str(y))
+                    note('belt_of', lb.iloc[0]['Player'], f"{y} yearly")
                     winners[(y, 4)] = lb.iloc[0]['Player']     # counts toward back-to-back belts
                     for p in lb['Player']:
                         add(p, 'board')
@@ -539,9 +570,12 @@ def compute_badges(df, curr_year, curr_q):
                     seconds[(y, q)] = lb.iloc[1]['Player']
                 if q < 4:
                     add(lb.iloc[0]['Player'], 'belt')
+                    note('belt_of', lb.iloc[0]['Player'], f"Q{q} {y}")
                 else:
                     add(lb.iloc[0]['Player'], 'undisputed')
                     add(lb.iloc[0]['Player'], 'belt')          # the yearly winner gets the belt too
+                    note('undisputed_of', lb.iloc[0]['Player'], str(y))
+                    note('belt_of', lb.iloc[0]['Player'], f"{y} yearly")
                     for p in lb['Player']:
                         add(p, 'board')
             qkeys.append((y, q))
@@ -563,7 +597,6 @@ def compute_badges(df, curr_year, curr_q):
         if n >= BRIDESMAID_TIMES:
             add(p, 'bridesmaid')
 
-    notes = {'owner_of': {}}
     _quirky_badges(df, add, curr_year, curr_q, notes)
 
     # Against the Odds: won a pod where all 3 opponents already held a belt (Q1-Q3) at the time
@@ -580,8 +613,17 @@ def compute_badges(df, curr_year, curr_q):
         if all(o in belt_since and belt_since[o] < g['Date'].iloc[0] for o in others):
             add(won[0], 'odds')
 
+    for p, e in earned.items():                       # badges built from other badges
+        if e.get('owner', 0) >= DOG_WALKER_OWNS:
+            add(p, 'dogwalker')
+        if sum(1 for n in e.values() if n >= COLLECTOR_COPIES) >= COLLECTOR_KINDS:
+            add(p, 'collector')
+
     earned = {p: v for p, v in earned.items() if p not in IGNORED_PLAYERS}
-    return earned, {'winners': winners, 'qkeys': qkeys, 'qrating': qrating, 'owner_of': notes['owner_of']}
+    for k in ('owner_of', 'rival_of'):                 # names alphabetical; belts stay in date order
+        for lst in notes[k].values():
+            lst.sort()
+    return earned, {'winners': winners, 'qkeys': qkeys, 'qrating': qrating, **notes}
 
 
 def _n(n, word):
@@ -738,6 +780,21 @@ def next_up(df, player, mine, extras, curr_year, curr_q):
     put('peace', n_d, PEACE_DRAWS, f"{_n(PEACE_DRAWS - n_d, 'more draw')} ({n_d}/{PEACE_DRAWS})")
     put('scarred', n_l, SCARRED_LOSSES, f"{SCARRED_LOSSES - n_l} more {'loss' if SCARRED_LOSSES - n_l == 1 else 'losses'} ({n_l}/{SCARRED_LOSSES})")
 
+    put('dogwalker', mine.get('owner', 0), DOG_WALKER_OWNS,
+        f"Owner on {mine.get('owner', 0)}/{DOG_WALKER_OWNS} players")
+    kinds = sum(1 for n in mine.values() if n >= COLLECTOR_COPIES)
+    put('collector', kinds, COLLECTOR_KINDS,
+        f"{kinds}/{COLLECTOR_KINDS} badges with {COLLECTOR_COPIES}+ copies")
+
+    # Iron Man: perfect attendance this quarter, so far out of the league Mondays it will have
+    if curr_year >= CHAMPIONSHIP_START_YEAR and 'ironman' not in mine:
+        qd = df[(df['Year'] == curr_year) & (df['Quarter'] == f'Q{curr_q}')]
+        weeks_all = set(qd['Year_Week'])
+        if weeks_all and set(qd.loc[qd['Player'] == player, 'Year_Week']) >= weeks_all:
+            total = len(weeks_all) + mondays_left_after(df['Date'].max().date(), datetime.date.today())
+            put('ironman', len(weeks_all), max(total, len(weeks_all) + 1),
+                f"Perfect attendance: {len(weeks_all)}/{total} weeks", tag=f"Q{curr_q} so far")
+
     # Monday-level runs (current run counting back from the latest league Monday)
     nights = sorted(df['Date'].unique())
     by_night = {dt: n for dt, n in g.groupby('Date')}
@@ -775,7 +832,7 @@ def next_up(df, player, mine, extras, curr_year, curr_q):
         mine_pods = d.loc[(d['Player'] == player) & (d['Res'] == 'win'), '_pk']
         for pk, pod in d[d['_pk'].isin(set(mine_pods))].groupby('_pk'):
             if (pod['Res'] == 'win').sum() == 1:
-                beats.update(o for o in pod['Player'] if o != player)
+                beats.update(o for o in pod['Player'] if o != player and o not in IGNORED_PLAYERS)
         if beats:
             foe, c = beats.most_common(1)[0]
             if c < OWNER_BEATS:
@@ -956,6 +1013,7 @@ def winner_concentration(df):
         'Player': players, 'Pods': played.astype(int), 'Wins': obs.astype(int),
         'Expected': exp.round(1), 'Above luck': (obs - exp).round(1),
         'z': ((obs - exp) / np.sqrt(np.where(var > 0, var, 1))).round(2)})
+    table = table[~table['Player'].isin(IGNORED_PLAYERS)]
     return dict(table=table, pods=len(dec), top5=float(top5), luck_top5=float(sim_top5.mean()),
                 luck_lo=float(np.percentile(sim_top5, 2.5)), luck_hi=float(np.percentile(sim_top5, 97.5)),
                 p_top5=float((sim_top5 >= top5).mean()), p_chi=float((chi_sims >= chi_obs).mean()),
@@ -1008,6 +1066,27 @@ MOBILE_CSS = """<style>
 .mnm-metric .l { font-size: 12px; opacity: 0.7; line-height: 1.25; }
 .mnm-metric .v { font-size: 22px; font-weight: 600; line-height: 1.35; }
 .mnm-metric .s { font-size: 11px; opacity: 0.6; line-height: 1.25; }
+.mnm-ear { position: absolute; top: 0; right: 0; padding: 2px 8px 3px 9px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; line-height: 1.2; background: rgba(128,128,128,0.30); border-radius: 0 14px 0 10px; }
+.mnm-metrics.five { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 640px) {
+  .mnm-metrics.five { grid-template-columns: repeat(2, 1fr); }
+  .mnm-metrics.five .mnm-metric:last-child { grid-column: 1 / -1; }
+}
+.mnm-cols { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 8px 0; }
+.mnm-col { flex: 1 1 270px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.mnm-panel { background: rgba(128,128,128,0.12); border-radius: 14px; padding: 12px 14px; border-left: 4px solid #00ffcc; }
+.mnm-panel .t { font-weight: 700; font-size: 15px; line-height: 1.3; }
+.mnm-panel .st { font-size: 12px; opacity: 0.6; margin-bottom: 6px; }
+.mnm-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid rgba(128,128,128,0.2); }
+.mnm-row b { overflow-wrap: anywhere; }
+.mnm-pill { border-radius: 999px; padding: 1px 10px; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.mnm-pill.bad { background: rgba(255,107,107,0.22); }
+.mnm-pill.good { background: rgba(74,222,128,0.22); }
+.mnm-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.mnm-tile { background: rgba(128,128,128,0.14); border-radius: 12px; padding: 8px 10px; }
+.mnm-tile .l { font-size: 12px; opacity: 0.7; line-height: 1.25; }
+.mnm-tile .v { font-size: 20px; font-weight: 700; line-height: 1.4; }
+.mnm-tile .s { font-size: 11.5px; opacity: 0.65; }
 .mnm-wrap { overflow-x: auto; margin-bottom: 8px; padding: 2px 6px 4px 6px; border-radius: 14px; border: 1px solid rgba(128,128,128,0.25); background: rgba(128,128,128,0.07); }
 div[data-testid="stPlotlyChart"] { border-radius: 14px; overflow: hidden; background: rgba(128,128,128,0.07); border: 1px solid rgba(128,128,128,0.25); padding: 6px 4px 2px 4px; }
 table.mnm-table { width: 100%; border-collapse: separate; border-spacing: 0 3px; font-size: 13px; }
@@ -1041,7 +1120,7 @@ def _signed(v):
     return f"{v:+.1f}"
 
 
-def metric_grid(items):
+def metric_grid(items, cls=""):
     """Stat cards that wrap two-per-row on a phone and never cut their labels off."""
     cards = ""
     for it in items:
@@ -1049,7 +1128,7 @@ def metric_grid(items):
         cards += (f'<div class="mnm-metric"><div class="l">{html.escape(str(it[0]))}</div>'
                   f'<div class="v">{html.escape(str(it[1]))}</div>'
                   + (f'<div class="s">{html.escape(str(sub))}</div>' if sub else "") + '</div>')
-    st.markdown(f'<div class="mnm-metrics">{cards}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="mnm-metrics {cls}">{cards}</div>', unsafe_allow_html=True)
 
 
 def week_moves(now_lb, prev_lb):
@@ -1183,7 +1262,7 @@ def show_store_stats(sdf):
         return
 
     # ---- Mondays as a whole ----
-    nights = sdf.groupby('Date')['Player'].nunique()
+    nights = sdf[~sdf['Player'].isin(IGNORED_PLAYERS)].groupby('Date')['Player'].nunique()
     metric_grid([("Mondays", len(nights)), ("Pods played", len(pods)),
                  ("Avg players / Monday", f"{nights.mean():.1f}"),
                  ("Avg pod size", f"{pods['size'].mean():.2f}")])
@@ -1421,6 +1500,38 @@ def show_news(lines, note="", top=""):
         unsafe_allow_html=True)
 
 
+def _url_get(key):
+    """A value from the page address (?player=Name), or None."""
+    try:
+        v = st.query_params.get(key)
+    except Exception:
+        try:
+            v = (st.experimental_get_query_params().get(key) or [None])[0]
+        except Exception:
+            v = None
+    return v if isinstance(v, str) else None
+
+
+def _url_set(key, value):
+    """Put a value in the page address so bookmarks and home-screen shortcuts remember it."""
+    try:
+        st.query_params[key] = value
+    except Exception:
+        try:
+            st.experimental_set_query_params(**{key: value})
+        except Exception:
+            pass
+
+
+def _window():
+    # a light outlined box; older Streamlit versions without border= just get a plain container
+    try: return st.container(border=True)
+    except TypeError: return st.container()
+
+def _remember_player():
+    _url_set("player", st.session_state.get("player_pick", ""))
+
+
 # --- APP START ---
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 raw_df = load_data()
@@ -1431,6 +1542,7 @@ if raw_df is not None:
     curr_year = now.year
     curr_q_label = f"Q{(now.month - 1) // 3 + 1}"
 
+    board_df = raw_df[~raw_df['Player'].isin(IGNORED_PLAYERS)]      # placeholder players stay off the boards
     st.sidebar.title("League Season")
     available_years = sorted(raw_df['Year'].unique().tolist(), reverse=True)
     try:
@@ -1444,12 +1556,16 @@ if raw_df is not None:
 
     if sel_year >= CHAMPIONSHIP_START_YEAR:
         q_options = ["Q1", "Q2", "Q3", "Q4 (Championship)"]
-        def_q_idx = next((i for i, opt in enumerate(q_options) if curr_q_label in opt), 0)
+        have_q = set(raw_df.loc[raw_df['Year'] == sel_year, 'Quarter'])
+        # open on this quarter, or the latest one with games so the page is never empty early in a quarter
+        want_q = (curr_q_label if sel_year == curr_year and (curr_q_label == 'Q4' or curr_q_label in have_q)
+                  else max(have_q))
+        def_q_idx = next((i for i, opt in enumerate(q_options) if want_q in opt), 0)
         sel_q = st.sidebar.selectbox("Quarter", q_options, index=def_q_idx)
 
         if "Q4" in sel_q:
             is_q4 = True
-            year_df = raw_df[raw_df['Year'] == sel_year]
+            year_df = board_df[board_df['Year'] == sel_year]
             min_req = MIN_GAMES_YEAR
             rate = Fraction(CARRY_WIN_PTS, WIN_PTS)
             desc = (
@@ -1459,12 +1575,12 @@ if raw_df is not None:
                 + f"). {min_req} game min, counting all games this year."
             )
         else:
-            season_df = raw_df[(raw_df['Year'] == sel_year) & (raw_df['Quarter'] == sel_q[:2])]
+            season_df = board_df[(board_df['Year'] == sel_year) & (board_df['Quarter'] == sel_q[:2])]
             min_req = MIN_GAMES_Q
             desc = (f"📈 **Points Mode ({sel_q[:2]})**: Base {BASE_RATING} Rating. "
                     f"{scoring_text} ({min_req} game min)")
     else:
-        season_df = raw_df[raw_df['Year'] == sel_year]
+        season_df = board_df[board_df['Year'] == sel_year]
         min_req = MIN_GAMES_LEGACY
         desc = f"📜 **Legacy Mode**: Historic scoring ({scoring_text}). ({min_req} game min)"
 
@@ -1504,7 +1620,7 @@ if raw_df is not None:
     holders = {b[0]: sorted(((p, e[b[0]]) for p, e in all_earned.items() if b[0] in e),
                             key=lambda x: (-x[1], x[0])) for b in BADGES}
     rarity = {k: len(v) / len(all_earned) * 100 for k, v in holders.items()}
-    player_names = sorted(raw_df['Player'].unique())
+    player_names = sorted(p for p in raw_df['Player'].unique() if p not in IGNORED_PLAYERS)
 
     # --- NEWS ---
     on_current_season = sel_year == curr_year and (sel_year < CHAMPIONSHIP_START_YEAR or sel_q.startswith(curr_q_label))
@@ -1537,7 +1653,7 @@ if raw_df is not None:
             st.markdown(
                 '<div class="mnm-legend">'
                 '<span class="mnm-chip" style="background: rgba(212, 175, 55, 0.32);">Gold</span>'
-                f'top {TOP_N}<br>'
+                f'top {TOP_N}<span style="display:inline-block; width:16px;"></span>'
                 '<span class="mnm-chip" style="background: rgba(192, 192, 192, 0.18);">Silver</span>'
                 f'Over {BASE_RATING} points</div>',
                 unsafe_allow_html=True)
@@ -1569,24 +1685,12 @@ if raw_df is not None:
 
     # --- TAB 2: MY STATS ---
     with tab2:
-        player_sel = st.selectbox("Search Player", player_names)
-        p_data = raw_df[raw_df['Player'] == player_sel].copy()
-        p_data = p_data.sort_values(['Date', 'Round'])
-
-        # 1. Lifetime Logic
-        t_wins = (p_data['Res'] == 'win').sum()
-        t_draws = (p_data['Res'] == 'draw').sum()
-        total_gp = len(p_data)
-        lifetime_wr = ((t_wins + (t_draws * 0.25)) / total_gp * 100) if total_gp > 0 else 0
-
-        # 2. Form Logic (Last 32 games)
-        p_data['Win_Val'] = (p_data['Res'] == 'win').astype(int) + ((p_data['Res'] == 'draw').astype(int) * 0.25)
-        recent_32 = p_data.tail(32)
-        form_32_wr = (recent_32['Win_Val'].mean() * 100) if not recent_32.empty else 0
-
-        # Metrics Display
-        metric_grid([("Games Played", total_gp), ("Total WR", f"{lifetime_wr:.1f}%"),
-                     ("Last 32 games WR", f"{form_32_wr:.1f}%")])
+        saved = _url_get("player")
+        player_sel = st.selectbox("Search Player", player_names, key="player_pick", on_change=_remember_player,
+                                  index=player_names.index(saved) if saved in player_names else 0)
+        st.caption("Tip: after picking your name, bookmark this page or add it to your home screen. "
+                   "It will open on your profile next time.")
+        p_all = raw_df[raw_df['Player'] == player_sel].sort_values(['Date', 'Round'])
 
         # Percentile among players with a similar number of lifetime games
         bracket_label, pct, bracket_n = bracket_percentile(raw_df, player_sel)
@@ -1595,72 +1699,146 @@ if raw_df is not None:
         else:
             st.markdown(f"📊 Your win rate beats **{pct:.0f}%** of the other {bracket_n - 1} players with **{bracket_label}** games.")
 
-        # Lucky Seat (4-player only)
-        lucky_data = p_data[p_data['Pod Size'] == 4]
-        best_seat = "N/A"
-        if not lucky_data.empty:
-            seat_stats = lucky_data.groupby('Seat')['Res'].apply(lambda x: (x == 'win').sum() / len(x))
-            if not seat_stats.empty:
-                best_seat = f"Seat {int(seat_stats.idxmax())}"
-
-        st.divider()
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown("#### 💀 Nemesis List")
-            my_pod_ids = p_data['Pod ID'].unique()
-            pod_winners = raw_df[(raw_df['Pod ID'].isin(my_pod_ids)) & (raw_df['Res'] == 'win') & (raw_df['Player'] != player_sel)]
-            if not pod_winners.empty:
-                nemesis = pod_winners['Player'].value_counts().head(3)
-                for name, count in nemesis.items():
-                    st.write(f"**{name}**: {count} wins vs you")
+        with _window():
+            # Timeframe: all time, a year, or a single quarter (only ones this player has games in)
+            yq = sorted({(int(y), q) for y, q in zip(p_all['Year'], p_all['Quarter'])}, reverse=True)
+            yrs = sorted({y for y, _ in yq}, reverse=True)
+            frame_opts = ["All time"] + [f"{y} (full year)" for y in yrs] + [f"{y} {q}" for y, q in yq]
+            frame = st.selectbox("Timeframe", frame_opts, key=f"pframe_{player_sel}")
+            if frame == "All time":
+                p_data = p_all.copy()
+            elif frame.endswith("(full year)"):
+                p_data = p_all[p_all['Year'] == int(frame[:4])].copy()
             else:
-                st.write("No Nemesis found yet!")
-        with col_right:
-            st.markdown("#### 🍀 Lucky Seat")
-            st.write(f"Best position: **{best_seat}**")
+                p_data = p_all[(p_all['Year'] == int(frame[:4])) & (p_all['Quarter'] == frame[5:])].copy()
+            if frame != "All time":
+                st.caption(f"Showing {frame.replace(' (full year)', '')} only. "
+                           "The percentile above, Badges and Next Up are always lifetime.")
 
-        st.divider()
-        st.markdown("#### ⚡ EMA Win Rate")
+            # 1. Lifetime Logic
+            t_wins = (p_data['Res'] == 'win').sum()
+            t_draws = (p_data['Res'] == 'draw').sum()
+            total_gp = len(p_data)
+            lifetime_wr = ((t_wins + (t_draws * 0.25)) / total_gp * 100) if total_gp > 0 else 0
 
-        WINDOW = 32
-        PRIOR_WR = 0.25
-        wins_list = p_data['Win_Val'].tolist()
-        history = []
-        for i in range(len(wins_list)):
-            start = max(0, i - WINDOW + 1)
-            current_window = wins_list[start: i + 1]
-            real_count = len(current_window)
-            fake_count = max(0, WINDOW - real_count)
-            total_wins = sum(current_window) + (fake_count * PRIOR_WR)
-            history.append((total_wins / WINDOW) * 100)
+            # 2. Form Logic (Last 32 games)
+            p_data['Win_Val'] = (p_data['Res'] == 'win').astype(int) + ((p_data['Res'] == 'draw').astype(int) * 0.25)
+            recent_32 = p_data.tail(32)
+            form_32_wr = (recent_32['Win_Val'].mean() * 100) if not recent_32.empty else 0
 
-        p_data['Momentum_WR'] = history
-        session_df = p_data.groupby('Date').agg({'Momentum_WR': 'last'}).reset_index()
-        session_df['EMA_WR'] = session_df['Momentum_WR'].ewm(span=3, adjust=False).mean()
+            # Metrics Display
+            def round_wr(n):
+                r = p_data[p_data['Round'] == n]
+                return (f"{r['Win_Val'].mean() * 100:.1f}%", f"{len(r)} games") if len(r) else ("N/A", "")
 
-        p_min, p_max = session_df['EMA_WR'].min(), session_df['EMA_WR'].max()
-        y_bottom = max(0, min(p_min - 8, 20))
-        y_top = min(100, max(p_max + 8, 35))
+            r1, r2 = round_wr(1), round_wr(2)
+            metric_grid([("Games Played", total_gp), ("Total WR", f"{lifetime_wr:.1f}%"),
+                         ("Round 1 WR", r1[0], r1[1]), ("Round 2 WR", r2[0], r2[1]),
+                         ("Last 32 games WR", f"{form_32_wr:.1f}%")], cls="five")
 
-        fig = px.area(
-            session_df, x='Date', y='EMA_WR',
-            template="plotly_dark",
-            labels={'EMA_WR': 'Win Rate %', 'Date': 'Session'},
-            hover_data={'Date': '|%b %d, %Y', 'EMA_WR': ':.1f'}
-        )
-        fig.update_traces(
-            line_shape='spline', line_color='#00ffcc',
-            fillcolor='rgba(0, 255, 204, 0.1)', line_width=4,
-            mode='lines+markers', marker=dict(size=7, line=dict(width=1, color='white'))
-        )
-        fig.update_layout(
-            hovermode="x unified", height=300, margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(range=[y_bottom, y_top], ticksuffix="%"),
-            xaxis=dict(showgrid=False, tickformat="%b %d<br>%Y", nticks=5)
-        )
-        fig.add_hline(y=25, line_dash="dash", line_color="gray", opacity=0.4)
-        phone_fig(fig, 300)
-        st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+            # Lucky Seat (4-player only)
+            lucky_data = p_data[p_data['Pod Size'] == 4]
+            best_seat, worst_seat = "N/A", "N/A"
+            if not lucky_data.empty:
+                seat_stats = lucky_data.groupby('Seat')['Res'].apply(lambda x: (x == 'win').sum() / len(x))
+                if not seat_stats.empty:
+                    best_seat = f"Seat {int(seat_stats.idxmax())}"
+                    if len(seat_stats) > 1 and seat_stats.min() < seat_stats.max():
+                        seat_games = lucky_data.groupby('Seat').size()
+                        low = seat_stats[seat_stats == seat_stats.min()].index
+                        worst_seat = f"Seat {int(max(low, key=lambda x: seat_games[x]))}"   # most games breaks a tie
+
+            st.divider()
+            # streaks (a draw or the other result ends a run)
+            def runs(kind):
+                best = cur = 0
+                for r in p_data['Res']:
+                    cur = cur + 1 if r == kind else 0
+                    best = max(best, cur)
+                return cur, best
+
+            win_cur, win_best = runs('win')
+            loss_cur, loss_best = runs('loss')
+
+            esc = html.escape
+
+            def panel(title, sub, body):
+                return (f'<div class="mnm-panel"><div class="t">{title}</div>'
+                        + (f'<div class="st">{sub}</div>' if sub else "") + body + '</div>')
+
+            def name_rows(counts, unit, kind, empty):
+                if counts.empty:
+                    return f'<div class="mnm-row"><span style="opacity:0.6">{empty}</span></div>'
+                return "".join(f'<div class="mnm-row"><b>{esc(n)}</b><span class="mnm-pill {kind}">{c} {unit}</span></div>'
+                               for n, c in counts.head(3).items())
+
+            def tiles(items):
+                return '<div class="mnm-tiles">' + "".join(
+                    f'<div class="mnm-tile"><div class="l">{l}</div><div class="v">{v}</div>'
+                    + (f'<div class="s">{sub}</div>' if sub else "") + '</div>' for l, v, sub in items) + '</div>'
+
+            my_pod_ids = p_data['Pod ID'].unique()
+            in_my_pods = raw_df[(raw_df['Pod ID'].isin(my_pod_ids)) & (raw_df['Player'] != player_sel)
+                                & ~raw_df['Player'].isin(IGNORED_PLAYERS)]
+            nemeses = in_my_pods.loc[in_my_pods['Res'] == 'win', 'Player'].value_counts()
+            my_win_pods = p_data.loc[p_data['Res'] == 'win', 'Pod ID'].unique()
+            victims = in_my_pods.loc[in_my_pods['Pod ID'].isin(my_win_pods), 'Player'].value_counts()
+
+            left = (panel("💀 Nemesis List", "Players who beat you the most",
+                          name_rows(nemeses, "wins", "bad", "No Nemesis found yet!"))
+                    + panel("🎯 Favorite Victims", "Players you've beaten the most",
+                            name_rows(victims, "wins", "good", "No victims yet!")))
+            right = (panel("🪑 Seat Luck", "From 4-player pods",
+                           tiles([("🍀 Best seat", best_seat.replace("Seat ", "Seat&nbsp;"), ""),
+                                  ("🌧️ Worst seat", worst_seat.replace("Seat ", "Seat&nbsp;"), "")]))
+                     + panel("📈 Streaks", "A draw ends a streak",
+                             tiles([("🔥 Best win streak", win_best, f"Current: {win_cur}"),
+                                    ("🥶 Worst losing streak", loss_best, f"Current: {loss_cur}")])))
+            st.markdown(f'<div class="mnm-cols"><div class="mnm-col">{left}</div><div class="mnm-col">{right}</div></div>',
+                        unsafe_allow_html=True)
+
+            st.divider()
+            st.markdown("#### ⚡ EMA Win Rate")
+
+            WINDOW = 32
+            PRIOR_WR = 0.25
+            wins_list = p_data['Win_Val'].tolist()
+            history = []
+            for i in range(len(wins_list)):
+                start = max(0, i - WINDOW + 1)
+                current_window = wins_list[start: i + 1]
+                real_count = len(current_window)
+                fake_count = max(0, WINDOW - real_count)
+                total_wins = sum(current_window) + (fake_count * PRIOR_WR)
+                history.append((total_wins / WINDOW) * 100)
+
+            p_data['Momentum_WR'] = history
+            session_df = p_data.groupby('Date').agg({'Momentum_WR': 'last'}).reset_index()
+            session_df['EMA_WR'] = session_df['Momentum_WR'].ewm(span=3, adjust=False).mean()
+
+            p_min, p_max = session_df['EMA_WR'].min(), session_df['EMA_WR'].max()
+            y_bottom = max(0, min(p_min - 8, 20))
+            y_top = min(100, max(p_max + 8, 35))
+
+            fig = px.area(
+                session_df, x='Date', y='EMA_WR',
+                template="plotly_dark",
+                labels={'EMA_WR': 'Win Rate %', 'Date': 'Session'},
+                hover_data={'Date': '|%b %d, %Y', 'EMA_WR': ':.1f'}
+            )
+            fig.update_traces(
+                line_shape='spline', line_color='#00ffcc',
+                fillcolor='rgba(0, 255, 204, 0.1)', line_width=4,
+                mode='lines+markers', marker=dict(size=7, line=dict(width=1, color='white'))
+            )
+            fig.update_layout(
+                hovermode="x unified", height=300, margin=dict(l=0, r=0, t=10, b=0),
+                yaxis=dict(range=[y_bottom, y_top], ticksuffix="%"),
+                xaxis=dict(showgrid=False, tickformat="%b %d<br>%Y", nticks=5)
+            )
+            fig.add_hline(y=25, line_dash="dash", line_color="gray", opacity=0.4)
+            phone_fig(fig, 300)
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
 
         # --- BADGES (earned only; the full set lives in the Badges tab) ---
         st.divider()
@@ -1668,12 +1846,13 @@ if raw_df is not None:
         st.markdown(f"#### 🏅 Badges ({len(my_badges)}/{len(BADGES)})")
         if my_badges:
             earned_cards = "".join(
-                f'<div class="mnm-metric" style="border-left:5px solid #00ffcc;">'
-                f'<div style="font-size:22px">{icon}</div>'
-                f'<b>{html.escape(name)}{f" ×{my_badges[key]}" if my_badges[key] > 1 and key != "owner" else ""}</b><br>'
+                f'<div class="mnm-metric" style="position:relative; border-left:5px solid {tier_color(rarity[key])};">'
+                + ('<span class="mnm-ear">LIFETIME</span>' if key in ONE_TIME_BADGES else "")
+                + f'<div style="font-size:22px">{icon}</div>'
+                f'<b>{html.escape(name)}{f" ×{my_badges[key]}" if my_badges[key] > 1 and key not in VS_BADGES else ""}</b><br>'
                 f'<small style="color:gray">{html.escape(desc)}</small>'
-                + (f'<br><small style="color:#00ffcc">{html.escape(", ".join(sorted(badge_extras["owner_of"].get(player_sel, []))))}</small>'
-                   if key == "owner" else "")
+                + (f'<br><small style="color:#00ffcc">{html.escape(", ".join(badge_extras[VS_BADGES[key]].get(player_sel, [])))}</small>'
+                   if key in VS_BADGES else "")
                 + '</div>'
                 for key, icon, name, desc in sorted((b for b in BADGES if b[0] in my_badges),
                                                     key=lambda b: rarity[b[0]]))
@@ -1692,7 +1871,7 @@ if raw_df is not None:
             tag = (f'<span style="font-size:11px; color:#00ffcc; margin-left:6px;">{html.escape(it["tag"])}</span>'
                    if it['tag'] else '')
             return (f'<div style="background: rgba(255,255,255,0.05); padding: 12px 14px; border-radius: 14px; '
-                    f'margin-bottom: 8px; border-left: 5px solid #00ffcc;">'
+                    f'margin-bottom: 8px; border-left: 5px solid {tier_color(rarity[it["key"]])};">'
                     f'<div>{icon} <b>{html.escape(name)}</b>{tag}</div>'
                     f'<div style="font-size:13px; color:gray; margin-top:2px;">{html.escape(desc)}</div>'
                     f'<div style="height:8px; border-radius:4px; background: rgba(128,128,128,0.25); margin:10px 0 6px;">'
@@ -1720,6 +1899,12 @@ if raw_df is not None:
             'claimed by at least one player<br>'
             '<span class="mnm-chip" style="background: rgba(128, 128, 128, 0.22);">Greyed</span>'
             'nobody has it yet</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="mnm-legend">Trim shows how rare a badge is:&nbsp; '
+            '<span class="mnm-chip" style="background: rgba(212, 175, 55, 0.32);">Gold</span>under 10% of players&nbsp; '
+            '<span class="mnm-chip" style="background: rgba(192, 192, 192, 0.22);">Silver</span>10-20%&nbsp; '
+            '<span class="mnm-chip" style="background: rgba(205, 127, 50, 0.32);">Bronze</span>20% or more</div>',
+            unsafe_allow_html=True)
         st.caption("Tap a badge to see who has it.")
 
         def badge_card(b):
@@ -1734,11 +1919,11 @@ if raw_df is not None:
                 share = f"{pct_have:.0f}%" if pct_have >= 10 else f"{pct_have:.1f}%"
                 rar = f"{n} {'player' if n == 1 else 'players'} · {share}"
             dim = "" if have else "opacity:0.35; filter:grayscale(1);"
-            edge = "#00ffcc" if have else "#555"
+            edge = tier_color(pct_have) if have else "#555"
             bg = "rgba(0, 255, 204, 0.08)" if have else "rgba(255,255,255,0.05)"
             def _who(p, n):
-                if key == "owner":
-                    return html.escape(p) + " (" + html.escape(", ".join(sorted(badge_extras["owner_of"].get(p, [])))) + ")"
+                if key in VS_BADGES:
+                    return html.escape(p) + " (" + html.escape(", ".join(badge_extras[VS_BADGES[key]].get(p, []))) + ")"
                 return html.escape(p) + (f" ×{n}" if n > 1 else "")
             who = ", ".join(_who(p, n) for p, n in who_list) or "Nobody yet"
             return (f'<details style="box-sizing:border-box; background: {bg}; padding: 22px 20px; border-radius: 14px; border-left: 5px solid {edge};">'
@@ -1763,8 +1948,8 @@ if raw_df is not None:
         st.markdown(f"##### 🔁 Recurring badges ({sum(1 for b in recurring if holders[b[0]])}/{len(recurring)} claimed)")
         st.caption("These can be earned again and again.")
         badge_grid(recurring)
-        st.markdown(f"##### ☝️ One-time badges ({sum(1 for b in one_time if holders[b[0]])}/{len(one_time)} claimed)")
-        st.caption("You can only earn each of these once.")
+        st.markdown(f"##### ♾️ Lifetime badges ({sum(1 for b in one_time if holders[b[0]])}/{len(one_time)} claimed)")
+        st.caption("Earn each of these once and it's yours for life.")
         badge_grid(one_time)
 
     # --- TAB: STATS ---

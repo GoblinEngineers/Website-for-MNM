@@ -1500,6 +1500,38 @@ def show_news(lines, note="", top=""):
         unsafe_allow_html=True)
 
 
+def _url_get(key):
+    """A value from the page address (?player=Name), or None."""
+    try:
+        v = st.query_params.get(key)
+    except Exception:
+        try:
+            v = (st.experimental_get_query_params().get(key) or [None])[0]
+        except Exception:
+            v = None
+    return v if isinstance(v, str) else None
+
+
+def _url_set(key, value):
+    """Put a value in the page address so bookmarks and home-screen shortcuts remember it."""
+    try:
+        st.query_params[key] = value
+    except Exception:
+        try:
+            st.experimental_set_query_params(**{key: value})
+        except Exception:
+            pass
+
+
+def _window():
+    # a light outlined box; older Streamlit versions without border= just get a plain container
+    try: return st.container(border=True)
+    except TypeError: return st.container()
+
+def _remember_player():
+    _url_set("player", st.session_state.get("player_pick", ""))
+
+
 # --- APP START ---
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 raw_df = load_data()
@@ -1653,30 +1685,12 @@ if raw_df is not None:
 
     # --- TAB 2: MY STATS ---
     with tab2:
-        player_sel = st.selectbox("Search Player", player_names)
-        p_data = raw_df[raw_df['Player'] == player_sel].copy()
-        p_data = p_data.sort_values(['Date', 'Round'])
-
-        # 1. Lifetime Logic
-        t_wins = (p_data['Res'] == 'win').sum()
-        t_draws = (p_data['Res'] == 'draw').sum()
-        total_gp = len(p_data)
-        lifetime_wr = ((t_wins + (t_draws * 0.25)) / total_gp * 100) if total_gp > 0 else 0
-
-        # 2. Form Logic (Last 32 games)
-        p_data['Win_Val'] = (p_data['Res'] == 'win').astype(int) + ((p_data['Res'] == 'draw').astype(int) * 0.25)
-        recent_32 = p_data.tail(32)
-        form_32_wr = (recent_32['Win_Val'].mean() * 100) if not recent_32.empty else 0
-
-        # Metrics Display
-        def round_wr(n):
-            r = p_data[p_data['Round'] == n]
-            return (f"{r['Win_Val'].mean() * 100:.1f}%", f"{len(r)} games") if len(r) else ("N/A", "")
-
-        r1, r2 = round_wr(1), round_wr(2)
-        metric_grid([("Games Played", total_gp), ("Total WR", f"{lifetime_wr:.1f}%"),
-                     ("Round 1 WR", r1[0], r1[1]), ("Round 2 WR", r2[0], r2[1]),
-                     ("Last 32 games WR", f"{form_32_wr:.1f}%")], cls="five")
+        saved = _url_get("player")
+        player_sel = st.selectbox("Search Player", player_names, key="player_pick", on_change=_remember_player,
+                                  index=player_names.index(saved) if saved in player_names else 0)
+        st.caption("Tip: after picking your name, bookmark this page or add it to your home screen. "
+                   "It will open on your profile next time.")
+        p_all = raw_df[raw_df['Player'] == player_sel].sort_values(['Date', 'Round'])
 
         # Percentile among players with a similar number of lifetime games
         bracket_label, pct, bracket_n = bracket_percentile(raw_df, player_sel)
@@ -1685,109 +1699,146 @@ if raw_df is not None:
         else:
             st.markdown(f"📊 Your win rate beats **{pct:.0f}%** of the other {bracket_n - 1} players with **{bracket_label}** games.")
 
-        # Lucky Seat (4-player only)
-        lucky_data = p_data[p_data['Pod Size'] == 4]
-        best_seat, worst_seat = "N/A", "N/A"
-        if not lucky_data.empty:
-            seat_stats = lucky_data.groupby('Seat')['Res'].apply(lambda x: (x == 'win').sum() / len(x))
-            if not seat_stats.empty:
-                best_seat = f"Seat {int(seat_stats.idxmax())}"
-                if len(seat_stats) > 1 and seat_stats.min() < seat_stats.max():
-                    seat_games = lucky_data.groupby('Seat').size()
-                    low = seat_stats[seat_stats == seat_stats.min()].index
-                    worst_seat = f"Seat {int(max(low, key=lambda x: seat_games[x]))}"   # most games breaks a tie
+        with _window():
+            # Timeframe: all time, a year, or a single quarter (only ones this player has games in)
+            yq = sorted({(int(y), q) for y, q in zip(p_all['Year'], p_all['Quarter'])}, reverse=True)
+            yrs = sorted({y for y, _ in yq}, reverse=True)
+            frame_opts = ["All time"] + [f"{y} (full year)" for y in yrs] + [f"{y} {q}" for y, q in yq]
+            frame = st.selectbox("Timeframe", frame_opts, key=f"pframe_{player_sel}")
+            if frame == "All time":
+                p_data = p_all.copy()
+            elif frame.endswith("(full year)"):
+                p_data = p_all[p_all['Year'] == int(frame[:4])].copy()
+            else:
+                p_data = p_all[(p_all['Year'] == int(frame[:4])) & (p_all['Quarter'] == frame[5:])].copy()
+            if frame != "All time":
+                st.caption(f"Showing {frame.replace(' (full year)', '')} only. "
+                           "The percentile above, Badges and Next Up are always lifetime.")
 
-        st.divider()
-        # streaks (a draw or the other result ends a run)
-        def runs(kind):
-            best = cur = 0
-            for r in p_data['Res']:
-                cur = cur + 1 if r == kind else 0
-                best = max(best, cur)
-            return cur, best
+            # 1. Lifetime Logic
+            t_wins = (p_data['Res'] == 'win').sum()
+            t_draws = (p_data['Res'] == 'draw').sum()
+            total_gp = len(p_data)
+            lifetime_wr = ((t_wins + (t_draws * 0.25)) / total_gp * 100) if total_gp > 0 else 0
 
-        win_cur, win_best = runs('win')
-        loss_cur, loss_best = runs('loss')
+            # 2. Form Logic (Last 32 games)
+            p_data['Win_Val'] = (p_data['Res'] == 'win').astype(int) + ((p_data['Res'] == 'draw').astype(int) * 0.25)
+            recent_32 = p_data.tail(32)
+            form_32_wr = (recent_32['Win_Val'].mean() * 100) if not recent_32.empty else 0
 
-        esc = html.escape
+            # Metrics Display
+            def round_wr(n):
+                r = p_data[p_data['Round'] == n]
+                return (f"{r['Win_Val'].mean() * 100:.1f}%", f"{len(r)} games") if len(r) else ("N/A", "")
 
-        def panel(title, sub, body):
-            return (f'<div class="mnm-panel"><div class="t">{title}</div>'
-                    + (f'<div class="st">{sub}</div>' if sub else "") + body + '</div>')
+            r1, r2 = round_wr(1), round_wr(2)
+            metric_grid([("Games Played", total_gp), ("Total WR", f"{lifetime_wr:.1f}%"),
+                         ("Round 1 WR", r1[0], r1[1]), ("Round 2 WR", r2[0], r2[1]),
+                         ("Last 32 games WR", f"{form_32_wr:.1f}%")], cls="five")
 
-        def name_rows(counts, unit, kind, empty):
-            if counts.empty:
-                return f'<div class="mnm-row"><span style="opacity:0.6">{empty}</span></div>'
-            return "".join(f'<div class="mnm-row"><b>{esc(n)}</b><span class="mnm-pill {kind}">{c} {unit}</span></div>'
-                           for n, c in counts.head(3).items())
+            # Lucky Seat (4-player only)
+            lucky_data = p_data[p_data['Pod Size'] == 4]
+            best_seat, worst_seat = "N/A", "N/A"
+            if not lucky_data.empty:
+                seat_stats = lucky_data.groupby('Seat')['Res'].apply(lambda x: (x == 'win').sum() / len(x))
+                if not seat_stats.empty:
+                    best_seat = f"Seat {int(seat_stats.idxmax())}"
+                    if len(seat_stats) > 1 and seat_stats.min() < seat_stats.max():
+                        seat_games = lucky_data.groupby('Seat').size()
+                        low = seat_stats[seat_stats == seat_stats.min()].index
+                        worst_seat = f"Seat {int(max(low, key=lambda x: seat_games[x]))}"   # most games breaks a tie
 
-        def tiles(items):
-            return '<div class="mnm-tiles">' + "".join(
-                f'<div class="mnm-tile"><div class="l">{l}</div><div class="v">{v}</div>'
-                + (f'<div class="s">{sub}</div>' if sub else "") + '</div>' for l, v, sub in items) + '</div>'
+            st.divider()
+            # streaks (a draw or the other result ends a run)
+            def runs(kind):
+                best = cur = 0
+                for r in p_data['Res']:
+                    cur = cur + 1 if r == kind else 0
+                    best = max(best, cur)
+                return cur, best
 
-        my_pod_ids = p_data['Pod ID'].unique()
-        in_my_pods = raw_df[(raw_df['Pod ID'].isin(my_pod_ids)) & (raw_df['Player'] != player_sel)
-                            & ~raw_df['Player'].isin(IGNORED_PLAYERS)]
-        nemeses = in_my_pods.loc[in_my_pods['Res'] == 'win', 'Player'].value_counts()
-        my_win_pods = p_data.loc[p_data['Res'] == 'win', 'Pod ID'].unique()
-        victims = in_my_pods.loc[in_my_pods['Pod ID'].isin(my_win_pods), 'Player'].value_counts()
+            win_cur, win_best = runs('win')
+            loss_cur, loss_best = runs('loss')
 
-        left = (panel("💀 Nemesis List", "Players who beat you the most",
-                      name_rows(nemeses, "wins", "bad", "No Nemesis found yet!"))
-                + panel("🎯 Favorite Victims", "Players you've beaten the most",
-                        name_rows(victims, "wins", "good", "No victims yet!")))
-        right = (panel("🪑 Seat Luck", "From 4-player pods",
-                       tiles([("🍀 Best seat", best_seat.replace("Seat ", "Seat&nbsp;"), ""),
-                              ("🌧️ Worst seat", worst_seat.replace("Seat ", "Seat&nbsp;"), "")]))
-                 + panel("📈 Streaks", "A draw ends a streak",
-                         tiles([("🔥 Best win streak", win_best, f"Current: {win_cur}"),
-                                ("🥶 Worst losing streak", loss_best, f"Current: {loss_cur}")])))
-        st.markdown(f'<div class="mnm-cols"><div class="mnm-col">{left}</div><div class="mnm-col">{right}</div></div>',
-                    unsafe_allow_html=True)
+            esc = html.escape
 
-        st.divider()
-        st.markdown("#### ⚡ EMA Win Rate")
+            def panel(title, sub, body):
+                return (f'<div class="mnm-panel"><div class="t">{title}</div>'
+                        + (f'<div class="st">{sub}</div>' if sub else "") + body + '</div>')
 
-        WINDOW = 32
-        PRIOR_WR = 0.25
-        wins_list = p_data['Win_Val'].tolist()
-        history = []
-        for i in range(len(wins_list)):
-            start = max(0, i - WINDOW + 1)
-            current_window = wins_list[start: i + 1]
-            real_count = len(current_window)
-            fake_count = max(0, WINDOW - real_count)
-            total_wins = sum(current_window) + (fake_count * PRIOR_WR)
-            history.append((total_wins / WINDOW) * 100)
+            def name_rows(counts, unit, kind, empty):
+                if counts.empty:
+                    return f'<div class="mnm-row"><span style="opacity:0.6">{empty}</span></div>'
+                return "".join(f'<div class="mnm-row"><b>{esc(n)}</b><span class="mnm-pill {kind}">{c} {unit}</span></div>'
+                               for n, c in counts.head(3).items())
 
-        p_data['Momentum_WR'] = history
-        session_df = p_data.groupby('Date').agg({'Momentum_WR': 'last'}).reset_index()
-        session_df['EMA_WR'] = session_df['Momentum_WR'].ewm(span=3, adjust=False).mean()
+            def tiles(items):
+                return '<div class="mnm-tiles">' + "".join(
+                    f'<div class="mnm-tile"><div class="l">{l}</div><div class="v">{v}</div>'
+                    + (f'<div class="s">{sub}</div>' if sub else "") + '</div>' for l, v, sub in items) + '</div>'
 
-        p_min, p_max = session_df['EMA_WR'].min(), session_df['EMA_WR'].max()
-        y_bottom = max(0, min(p_min - 8, 20))
-        y_top = min(100, max(p_max + 8, 35))
+            my_pod_ids = p_data['Pod ID'].unique()
+            in_my_pods = raw_df[(raw_df['Pod ID'].isin(my_pod_ids)) & (raw_df['Player'] != player_sel)
+                                & ~raw_df['Player'].isin(IGNORED_PLAYERS)]
+            nemeses = in_my_pods.loc[in_my_pods['Res'] == 'win', 'Player'].value_counts()
+            my_win_pods = p_data.loc[p_data['Res'] == 'win', 'Pod ID'].unique()
+            victims = in_my_pods.loc[in_my_pods['Pod ID'].isin(my_win_pods), 'Player'].value_counts()
 
-        fig = px.area(
-            session_df, x='Date', y='EMA_WR',
-            template="plotly_dark",
-            labels={'EMA_WR': 'Win Rate %', 'Date': 'Session'},
-            hover_data={'Date': '|%b %d, %Y', 'EMA_WR': ':.1f'}
-        )
-        fig.update_traces(
-            line_shape='spline', line_color='#00ffcc',
-            fillcolor='rgba(0, 255, 204, 0.1)', line_width=4,
-            mode='lines+markers', marker=dict(size=7, line=dict(width=1, color='white'))
-        )
-        fig.update_layout(
-            hovermode="x unified", height=300, margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(range=[y_bottom, y_top], ticksuffix="%"),
-            xaxis=dict(showgrid=False, tickformat="%b %d<br>%Y", nticks=5)
-        )
-        fig.add_hline(y=25, line_dash="dash", line_color="gray", opacity=0.4)
-        phone_fig(fig, 300)
-        st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+            left = (panel("💀 Nemesis List", "Players who beat you the most",
+                          name_rows(nemeses, "wins", "bad", "No Nemesis found yet!"))
+                    + panel("🎯 Favorite Victims", "Players you've beaten the most",
+                            name_rows(victims, "wins", "good", "No victims yet!")))
+            right = (panel("🪑 Seat Luck", "From 4-player pods",
+                           tiles([("🍀 Best seat", best_seat.replace("Seat ", "Seat&nbsp;"), ""),
+                                  ("🌧️ Worst seat", worst_seat.replace("Seat ", "Seat&nbsp;"), "")]))
+                     + panel("📈 Streaks", "A draw ends a streak",
+                             tiles([("🔥 Best win streak", win_best, f"Current: {win_cur}"),
+                                    ("🥶 Worst losing streak", loss_best, f"Current: {loss_cur}")])))
+            st.markdown(f'<div class="mnm-cols"><div class="mnm-col">{left}</div><div class="mnm-col">{right}</div></div>',
+                        unsafe_allow_html=True)
+
+            st.divider()
+            st.markdown("#### ⚡ EMA Win Rate")
+
+            WINDOW = 32
+            PRIOR_WR = 0.25
+            wins_list = p_data['Win_Val'].tolist()
+            history = []
+            for i in range(len(wins_list)):
+                start = max(0, i - WINDOW + 1)
+                current_window = wins_list[start: i + 1]
+                real_count = len(current_window)
+                fake_count = max(0, WINDOW - real_count)
+                total_wins = sum(current_window) + (fake_count * PRIOR_WR)
+                history.append((total_wins / WINDOW) * 100)
+
+            p_data['Momentum_WR'] = history
+            session_df = p_data.groupby('Date').agg({'Momentum_WR': 'last'}).reset_index()
+            session_df['EMA_WR'] = session_df['Momentum_WR'].ewm(span=3, adjust=False).mean()
+
+            p_min, p_max = session_df['EMA_WR'].min(), session_df['EMA_WR'].max()
+            y_bottom = max(0, min(p_min - 8, 20))
+            y_top = min(100, max(p_max + 8, 35))
+
+            fig = px.area(
+                session_df, x='Date', y='EMA_WR',
+                template="plotly_dark",
+                labels={'EMA_WR': 'Win Rate %', 'Date': 'Session'},
+                hover_data={'Date': '|%b %d, %Y', 'EMA_WR': ':.1f'}
+            )
+            fig.update_traces(
+                line_shape='spline', line_color='#00ffcc',
+                fillcolor='rgba(0, 255, 204, 0.1)', line_width=4,
+                mode='lines+markers', marker=dict(size=7, line=dict(width=1, color='white'))
+            )
+            fig.update_layout(
+                hovermode="x unified", height=300, margin=dict(l=0, r=0, t=10, b=0),
+                yaxis=dict(range=[y_bottom, y_top], ticksuffix="%"),
+                xaxis=dict(showgrid=False, tickformat="%b %d<br>%Y", nticks=5)
+            )
+            fig.add_hline(y=25, line_dash="dash", line_color="gray", opacity=0.4)
+            phone_fig(fig, 300)
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
 
         # --- BADGES (earned only; the full set lives in the Badges tab) ---
         st.divider()
