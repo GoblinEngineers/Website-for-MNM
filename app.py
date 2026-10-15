@@ -1636,23 +1636,17 @@ if raw_df is not None:
     race = title_race(leaderboard, bench, n_left, min_req)
 
     # Define the top-level tabs
-    tab1, tab2, tab_store, tab_badges, tab3 = st.tabs(["🏆 Board", "👤 My Stats", "📊 Stats", "🏅 Badges", "📜 Log"])
-
-    # Playmat / shared links: a link with ?player=Name opens straight on My Stats (first load only,
-    # so people can still move around afterwards). Streamlit can't pick a tab itself, so a tiny
-    # script clicks it. If the script is blocked the page just opens on the Board as before.
-    if _url_get("player") and not st.session_state.get("_jumped"):
-        st.session_state["_jumped"] = True
-        try:
-            import streamlit.components.v1 as components
-            components.html(
-                "<script>(function(){var n=0,t=setInterval(function(){try{"
-                "var b=[].slice.call(window.parent.document.querySelectorAll('button[role=tab]'))"
-                ".filter(function(x){return x.textContent.indexOf('My Stats')>-1})[0];"
-                "if(b){b.click();clearInterval(t)}}catch(e){clearInterval(t)}"
-                "if(++n>40)clearInterval(t)},100)})();</script>", height=0)
-        except Exception:
-            pass
+    # Playmat / shared links: a link with ?player=Name opens on My Stats. Streamlit opens whichever
+    # tab is listed first, so for those visits (decided once per session, so the tab bar never
+    # reshuffles mid-visit) My Stats is simply put first.
+    if "_stats_first" not in st.session_state:
+        st.session_state["_stats_first"] = bool(_url_get("player"))
+    tab_labels = ["🏆 Board", "👤 My Stats", "📊 Stats", "🏅 Badges", "📜 Log"]
+    if st.session_state["_stats_first"]:
+        tab_labels = [tab_labels[1], tab_labels[0]] + tab_labels[2:]
+    by_label = dict(zip(tab_labels, st.tabs(tab_labels)))
+    tab1, tab2, tab_store, tab_badges, tab3 = (by_label[k] for k in
+        ["🏆 Board", "👤 My Stats", "📊 Stats", "🏅 Badges", "📜 Log"])
 
     # --- TAB 1: LEADERBOARD ---
     with tab1:
