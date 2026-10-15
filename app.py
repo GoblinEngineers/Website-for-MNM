@@ -1638,6 +1638,22 @@ if raw_df is not None:
     # Define the top-level tabs
     tab1, tab2, tab_store, tab_badges, tab3 = st.tabs(["🏆 Board", "👤 My Stats", "📊 Stats", "🏅 Badges", "📜 Log"])
 
+    # Playmat / shared links: a link with ?player=Name opens straight on My Stats (first load only,
+    # so people can still move around afterwards). Streamlit can't pick a tab itself, so a tiny
+    # script clicks it. If the script is blocked the page just opens on the Board as before.
+    if _url_get("player") and not st.session_state.get("_jumped"):
+        st.session_state["_jumped"] = True
+        try:
+            import streamlit.components.v1 as components
+            components.html(
+                "<script>(function(){var n=0,t=setInterval(function(){try{"
+                "var b=[].slice.call(window.parent.document.querySelectorAll('button[role=tab]'))"
+                ".filter(function(x){return x.textContent.indexOf('My Stats')>-1})[0];"
+                "if(b){b.click();clearInterval(t)}}catch(e){clearInterval(t)}"
+                "if(++n>40)clearInterval(t)},100)})();</script>", height=0)
+        except Exception:
+            pass
+
     # --- TAB 1: LEADERBOARD ---
     with tab1:
         def row_bg(row):
