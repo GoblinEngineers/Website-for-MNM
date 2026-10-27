@@ -1,11 +1,11 @@
-21:46:11  start
-21:47:17  event chosen: 1019-cedh-game-universe-franklin
-21:47:18  rounds downloaded, 5819 chars
-21:47:18  json parsed
-21:47:18  date ok 10/19/2026
-21:47:18  thread text built: 12 tables, pending=0, auto=0
-21:47:18  aliases written
-21:47:19  saved
-21:47:19  text loaded into Entry
-21:47:19  calling CommitSession
-21:47:38  done
+21:54:38  start
+21:54:53  event chosen: 1026-cedh-game-universe-franklin
+21:54:53  rounds downloaded, 13749 chars
+21:54:53  json parsed
+21:54:53  date ok 10/26/2026
+21:54:53  thread text built: 8 tables, pending=0, auto=0
+21:54:53  aliases written
+21:54:54  saved
+21:54:54  text loaded into Entry
+21:54:54  calling CommitSession
+21:55:01  done
